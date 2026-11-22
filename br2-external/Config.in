@@ -1,0 +1,4 @@
+source "$BR2_EXTERNAL_BUNBUN_PATH/package/bunbun-lvgl/Config.in"
+source "$BR2_EXTERNAL_BUNBUN_PATH/package/bunbun-noto-sans-jp/Config.in"
+source "$BR2_EXTERNAL_BUNBUN_PATH/package/bunbun-ui-runtime/Config.in"
+

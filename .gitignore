@@ -1,0 +1,12 @@
+/build*/
+/artifacts/
+/sources/
+/downloads/
+/.orchestrator*/
+/private/
+**/target/
+**/__pycache__/
+*.pyc
+*.iso
+*.vhdx
+

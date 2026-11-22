@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crispawn:config:release-capabilities:1",
+  "title": "CRISPAWN release capability metadata v1",
+  "$comment": "Copyright (c) 2026 bunbun-liveos contributors. Licensed under Apache-2.0.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "kind": {
+      "const": "crispawn.release_capabilities"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "release_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$(?![\\s\\S])"
+    },
+    "architecture": {
+      "const": "x86_64"
+    },
+    "kernel_build": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$(?![\\s\\S])"
+    },
+    "live_config_versions": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535
+      },
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 96,
+        "pattern": "^[a-z][a-z0-9_.-]+$(?![\\s\\S])"
+      },
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "kind",
+    "schema_version",
+    "release_id",
+    "architecture",
+    "kernel_build",
+    "live_config_versions",
+    "capabilities"
+  ]
+}

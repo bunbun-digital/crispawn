@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "operation": "backup",
+  "source_ids": [],
+  "language": "ja",
+  "backup_directory": "crispawn/backups",
+  "gui": true,
+  "menu_seconds": 30,
+  "completion_seconds": 5,
+  "poweroff_on_success": true,
+  "log_policy": "always",
+  "log_sync_interval_ms": 0,
+  "probe_interval_ms": 250,
+  "tuning": {
+    "mode": "auto",
+    "profile": "balanced",
+    "io_policy": {
+      "no_progress_seconds": 180,
+      "failure_grace_seconds": 5,
+      "shutdown_grace_seconds": 20,
+      "transient_retries": 3,
+      "retry_delay_ms": 100
+    }
+  }
+}

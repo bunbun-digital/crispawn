@@ -1,0 +1,82 @@
+{
+  "kind": "crispawn.builder.project",
+  "schema_version": 1,
+  "target_pc": {
+    "mode": "this_pc"
+  },
+  "base": {
+    "source": "official",
+    "channel": "stable",
+    "architecture": "x86_64"
+  },
+  "runtime": {
+    "kind": "crispawn.live",
+    "schema_version": 2,
+    "sources": {
+      "mode": "all_internal"
+    },
+    "destination": {
+      "kind": "s3",
+      "endpoint": "https://s3.example",
+      "bucket": "crispawn-demo",
+      "region": "ap-northeast-1",
+      "prefix": "copies",
+      "credential_ref": "s3-demo"
+    },
+    "startup": {
+      "mode": "auto_copy",
+      "delay_seconds": 30
+    },
+    "completion": {
+      "action": "poweroff",
+      "delay_seconds": 5
+    },
+    "ui": {
+      "mode": "gui",
+      "language": "ja"
+    },
+    "logging": {
+      "policy": "always",
+      "sync_interval_ms": 0
+    },
+    "processing": {
+      "mode": "auto",
+      "initial_profile": "balanced",
+      "io_policy": {
+        "no_progress_seconds": 180,
+        "failure_grace_seconds": 5,
+        "shutdown_grace_seconds": 20,
+        "transient_retries": 3,
+        "retry_delay_ms": 100
+      }
+    },
+    "network": {
+      "mode": "auto",
+      "wifi_profiles": [
+        {
+          "id": "wifi-demo",
+          "ssid": {
+            "encoding": "utf8",
+            "value": "CRISPAWN-DEMO"
+          },
+          "security": "wpa2_psk",
+          "hidden": false,
+          "credential_ref": "wifi-demo"
+        }
+      ]
+    },
+    "diagnostics": {
+      "probe_interval_ms": 250
+    }
+  },
+  "output": {
+    "kind": "usb",
+    "device": {
+      "selection": "interactive"
+    }
+  },
+  "provisioning": {
+    "embed_credentials": true,
+    "credentials_file": "private/credentials.json"
+  }
+}

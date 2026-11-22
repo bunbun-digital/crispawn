@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crispawn:config:live:2",
+  "title": "CRISPAWN LiveOS runtime configuration v2",
+  "$comment": "Copyright (c) 2026 bunbun-liveos contributors. Licensed under Apache-2.0.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "kind": {
+      "const": "crispawn.live"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "sources": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/sources"
+    },
+    "destination": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/destination"
+    },
+    "startup": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/startup"
+    },
+    "completion": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/completion"
+    },
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "gui",
+            "console",
+            "headless"
+          ]
+        },
+        "language": {
+          "enum": [
+            "ja",
+            "en"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "language"
+      ]
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy": {
+          "enum": [
+            "always",
+            "on_error",
+            "never"
+          ]
+        },
+        "sync_interval_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60000
+        }
+      },
+      "required": [
+        "policy",
+        "sync_interval_ms"
+      ]
+    },
+    "processing": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/processing"
+    },
+    "network": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/network"
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "probe_interval_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 5000
+        }
+      },
+      "required": [
+        "probe_interval_ms"
+      ]
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "poweroff",
+            "stay"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  "required": [
+    "kind",
+    "schema_version",
+    "sources",
+    "destination",
+    "startup",
+    "completion",
+    "ui",
+    "logging",
+    "processing",
+    "network",
+    "diagnostics"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ui": {
+            "properties": {
+              "mode": {
+                "const": "headless"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          }
+        },
+        "required": [
+          "ui"
+        ]
+      },
+      "then": {
+        "properties": {
+          "startup": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "const": "auto_copy"
+              },
+              "delay_seconds": {
+                "const": 0
+              }
+            },
+            "required": [
+              "mode",
+              "delay_seconds"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "destination": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "smb",
+                  "s3"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "destination"
+        ]
+      },
+      "then": {
+        "properties": {
+          "network": {
+            "properties": {
+              "mode": {
+                "enum": [
+                  "auto",
+                  "ethernet",
+                  "wifi"
+                ]
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "ui": {
+            "properties": {
+              "mode": {
+                "const": "console"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "startup": {
+            "properties": {
+              "mode": {
+                "const": "auto_copy"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          }
+        },
+        "required": [
+          "ui",
+          "startup"
+        ]
+      },
+      "then": {
+        "properties": {
+          "startup": {
+            "properties": {
+              "delay_seconds": {
+                "const": 0
+              }
+            },
+            "required": [
+              "delay_seconds"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

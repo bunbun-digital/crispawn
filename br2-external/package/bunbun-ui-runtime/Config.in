@@ -1,0 +1,9 @@
+config BR2_PACKAGE_BUNBUN_UI_RUNTIME
+    bool "bunbun-ui-runtime"
+    depends on BR2_INSTALL_LIBSTDCPP
+    depends on !BR2_STATIC_LIBS
+    select BR2_PACKAGE_BUNBUN_LVGL
+    select BR2_PACKAGE_BUNBUN_NOTO_SANS_JP
+    help
+      Shared OS UI initialization: framebuffer, keyboard focus, Japanese
+      font and event processing. Applications use the upstream LVGL API.

@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0
+/* SPDX-License-Identifier: LicenseRef-Bunbun-Proprietary */
+/* This file is part of the OS SDK; consumers must use this exact configuration. */
+#ifndef LV_CONF_H
+#define LV_CONF_H
+
+#define LV_COLOR_FORMAT_DEFAULT LV_COLOR_FORMAT_XRGB8888
+#define LV_USE_OS LV_OS_NONE
+#define LV_USE_STDLIB_MALLOC LV_STDLIB_CLIB
+#define LV_USE_STDLIB_STRING LV_STDLIB_CLIB
+#define LV_USE_STDLIB_SPRINTF LV_STDLIB_CLIB
+#define LV_TXT_ENC LV_TXT_ENC_UTF8
+#define LV_USE_LOG 1
+#define LV_LOG_LEVEL LV_LOG_LEVEL_WARN
+#define LV_LOG_PRINTF 1
+#define LV_USE_ASSERT_MALLOC 1
+#define LV_USE_ASSERT_NULL 1
+
+#define LV_USE_DRAW_SW 1
+#define LV_USE_LINUX_FBDEV 1
+#define LV_LINUX_FBDEV_RENDER_MODE LV_DISPLAY_RENDER_MODE_PARTIAL
+#define LV_LINUX_FBDEV_BUFFER_COUNT 0
+#define LV_LINUX_FBDEV_BUFFER_SIZE 64
+#define LV_LINUX_FBDEV_MMAP 1
+#define LV_USE_EVDEV 1
+#define LV_USE_FREETYPE 1
+#define LV_FREETYPE_CACHE_FT_GLYPH_CNT 256
+#define LV_USE_FLEX 1
+#define LV_USE_GRID 1
+#define LV_USE_THEME_DEFAULT 1
+
+#define LV_USE_THORVG 0
+#define LV_USE_VECTOR_GRAPHIC 0
+#define LV_USE_LINUX_DRM 0
+#define LV_USE_LIBINPUT 0
+#define LV_USE_X11 0
+#define LV_USE_WAYLAND 0
+#define LV_USE_SDL 0
+#define LV_USE_FFMPEG 0
+#define LV_USE_GSTREAMER 0
+#define LV_BUILD_EXAMPLES 0
+#define LV_BUILD_DEMOS 0
+
+#endif

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crispawn:config:builder-project:1",
+  "title": "CRISPAWN Builder project configuration v1",
+  "$comment": "Copyright (c) 2026 bunbun-liveos contributors. Licensed under Apache-2.0.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "kind": {
+      "const": "crispawn.builder.project"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "target_pc": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/target_pc"
+    },
+    "base": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/base"
+    },
+    "runtime": {
+      "$ref": "urn:crispawn:config:live:2"
+    },
+    "output": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/output"
+    },
+    "provisioning": {
+      "$ref": "urn:crispawn:config:common:1#/$defs/provisioning"
+    }
+  },
+  "required": [
+    "kind",
+    "schema_version",
+    "target_pc",
+    "base",
+    "runtime",
+    "output",
+    "provisioning"
+  ]
+}

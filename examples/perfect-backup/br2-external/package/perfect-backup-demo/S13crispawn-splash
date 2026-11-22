@@ -1,0 +1,15 @@
+#!/bin/sh
+# Copyright (c) 2026 bunbun-digital. Licensed under Apache-2.0.
+# S12 has loaded the signed display/input drivers. Only presentation starts
+# here; the backup service still starts at S50 and owns its runtime directory.
+case "$1" in
+    start)
+        if [ "$(/usr/bin/perfect-backup-live gui-enabled /etc/perfect-backup/live.json)" = true ]; then
+            mkdir -m 700 /run/crispawn-display || exit 1
+            /usr/bin/perfect-backup-ui --boot /run/perfect-backup </dev/null >/run/crispawn-display/startup.log 2>&1 &
+            echo "$!" >/run/crispawn-display/pid
+        fi
+        ;;
+    stop) : ;; # The controller stops its adopted display cooperatively.
+    *) exit 1 ;;
+esac

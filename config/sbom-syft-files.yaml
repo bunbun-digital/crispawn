@@ -1,0 +1,11 @@
+# Copyright (c) 2026 bunbun-digital. All rights reserved.
+# Use only on the extracted release image, not the whole repository.
+check-for-app-update: false
+parallelism: 4
+file:
+  metadata:
+    selection: all
+    # SPDX 2.3 requires SHA-1; SHA-256 remains the content identity check.
+    digests:
+      - sha1
+      - sha256
