@@ -18,8 +18,8 @@ import shutil
 import subprocess
 import tempfile
 
-from backup_qemu_common import run_guest
-from backup_log_evidence import verify_log_directory
+from crispawn_qemu import run_guest
+from crispawn_log_evidence import verify_log_directory
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -86,7 +86,7 @@ def verify_case(folder, source, media, runtime, usb, host, env, *, proof=None):
                 name=row['relative_path']
                 assert re.fullmatch(r'data/data-[0-9]{6}\.pbk',name)
                 (archive/name).write_bytes(cat(prefix+name))
-        verified=subprocess.run(['python3',ROOT/'tools/check-backup-format.py',archive,'--source-file',source],
+        verified=subprocess.run(['python3',ROOT/'tools/check-crispawn-format.py',archive,'--source-file',source],
                                 env=dict(os.environ,PYTHONPATH=str(ROOT/'build/verifier-libs')),
                                 capture_output=True,timeout=180)
         (proof/'independent-verification.log').write_bytes(verified.stdout+verified.stderr)
@@ -151,7 +151,7 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     assert args.iso.is_file() and not args.iso.is_symlink()
     assert shutil.disk_usage(output).free > 12 << 30
-    spec = importlib.util.spec_from_file_location('usb', ROOT/'tools/create-backup-usb-image.py')
+    spec = importlib.util.spec_from_file_location('usb', ROOT/'tools/create-crispawn-usb-image.py')
     usb = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(usb)
     host, env = usb.tools()

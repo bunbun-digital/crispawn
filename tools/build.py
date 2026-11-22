@@ -49,7 +49,7 @@ def main():
     parser.add_argument('--download-cache', type=Path)
     parser.add_argument('--buildroot-source', type=Path, help='optional clean upstream source cache')
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 1, 8))
-    parser.add_argument('--release-id', default='0.1.0-alpha.1')
+    parser.add_argument('--release-id', default='0.1.0-alpha.2')
     args = parser.parse_args()
     assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", args.release_id), "invalid release ID"
     work = args.work_dir.resolve()
@@ -89,7 +89,7 @@ def main():
         env.update(PATH=str(toolchain/'bin')+os.pathsep+env['PATH'],
                    CARGO_HOME=str(work/'cargo-home'), CARGO_TARGET_DIR=str(work/'cargo-target'))
         run([toolchain/'bin/rustc','--version'],work/'toolchain.log',env)
-        run([toolchain/'bin/cargo','fetch','--locked','--manifest-path',ROOT/'examples/perfect-backup/rust/Cargo.toml'],
+        run([toolchain/'bin/cargo','fetch','--locked','--manifest-path',ROOT/'examples/crispawn/rust/Cargo.toml'],
             work/'cargo-fetch.log',env)
         upstream = lock['buildroot']
         source = args.buildroot_source.resolve() if args.buildroot_source else work/'buildroot-source'
@@ -114,12 +114,12 @@ def main():
             run(['python3',ROOT/'tools/prepare-debian-secure-boot-profile.py',
                  '--packages',cache/'debian','--output',profile,'--fetch'],work/'signed-profile.log',env)
         state['phase']='composing-iso';save()
-        run(['python3',ROOT/'tools/build-backup-live.py','--sdk',sdk,'--rootfs',sdk/'images/rootfs.cpio.xz',
+        run(['python3',ROOT/'tools/build-crispawn-live.py','--sdk',sdk,'--rootfs',sdk/'images/rootfs.cpio.xz',
              '--toolchain',toolchain,'--target-dir',work/'cargo-target',
              '--secure-boot-profile',profile,'--release-id',args.release_id,'--work-dir',work/'compose'],
              work/'compose.log',env)
         state['phase']='complete'
-        state['artifact_report']=str(ROOT/'artifacts/perfect-backup-live/latest-build.json')
+        state['artifact_report']=str(ROOT/'artifacts/crispawn-live/latest-build.json')
         state['userspace_config_sha256']=digest(sdk/'.config')
         state['private_sdk_used']=False
     except BaseException as error:

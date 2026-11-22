@@ -1,28 +1,36 @@
 # CRISPAWN integration compatibility
 
-The product name is **CRISPAWN Community**. Some identifiers in the initial
-release predate that name. They identify actual source packages, installed
-files and integration interfaces; they do not describe separate products.
+Current source folders, Rust packages, commands, C headers, exported UI symbols
+and the shared UI library use CRISPAWN names:
 
-| Identifier | Current purpose |
+- Application workspace: `examples/crispawn/rust/`.
+- Rust packages: `crispawn-core`, `crispawn-engine`, `crispawn-gui`, `crispawn-ui`.
+- Commands: `crispawn`, `crispawn-engine`, `crispawn-live`, `crispawn-gui`.
+- UI library: `libcrispawn-ui.so.1`; C headers: `crispawn/ui.h` and `crispawn/widgets.h`.
+- UI linker configuration: `CRISPAWN_UI_LIB_DIR`.
+- Runtime data: `/run/crispawn`; persistent data: `crispawn/` on NTFS.
+
+## Builder and stored-data interfaces
+
+These paths deliberately retain their existing spelling because Builder and
+existing boot media use them. They are integration identifiers, not product names.
+
+| Identifier | Purpose |
 | --- | --- |
-| `examples/perfect-backup/rust/` | Existing Rust workspace location |
-| `perfect-backup-*` | Internal executable and Rust package identifiers |
-| `bunbun-ui`, `libbunbun-ui.so.1`, `BUNBUN_UI_LIB_DIR` | Rust-to-C UI runtime integration and dynamic library interface |
-| `/etc/perfect-backup/live.json` | Embedded configuration consumed by LiveISO and written by Builder |
-| `/etc/perfect-backup/release-capabilities.json` | Capability contract read by Builder |
+| `/etc/perfect-backup/live.json` | Embedded configuration written by Builder |
+| `/etc/perfect-backup/release-capabilities.json` | Capability metadata read by Builder |
+| `/etc/perfect-backup/live-root` and its marker payload | LiveISO identification used by configuration tools |
 | `/perfect-backup.json` | External USB configuration override |
+| `/perfect-backup.iso` | ISO pathname used by Builder-created USB boot media |
+| `perfect-backup/` in saved archive paths | Legacy data path read as `crispawn/`; original records are not rewritten |
 
-Documentation uses CRISPAWN for the product and CRISPAWN UI SDK for its shared
-UI API. Technical examples use the identifiers implemented by the current
-source and released binaries, so they can be copied and run correctly.
+Changing Builder-facing paths requires a coordinated integration update.
+The archive layout, binary format, BLAKE3 range hashes, diagnostic probe markers
+and kernel boot parameters are preserved by the source naming cleanup.
 
-Renaming those interfaces requires coordinated source changes and build and
-compatibility checks. In particular, changing Builder-facing paths without a
-matching integration update would break configured ISO creation.
+## Historical releases
 
-The SBOM and corresponding-source archive attached to an existing release
-must describe that exact release. Package and file names in those records are
-not relabelled independently of their binaries. A renamed build needs a new
-release and regenerated inventory. Git history and previous releases retain
-their original, auditable identifiers.
+The SBOM and source archive attached to a published release describe that exact
+release. Their original names and hashes remain intact. Rebuilt releases have
+regenerated inventories for the new CRISPAWN package names. Git history and
+previous releases remain available for auditing.

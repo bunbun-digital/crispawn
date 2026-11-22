@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="examples/perfect-backup/assets/crispawn/logo-hero.png" alt="CRISPAWN" width="860">
+  <img src="examples/crispawn/assets/crispawn/logo-hero.png" alt="CRISPAWN" width="860">
 </p>
 
 # CRISPAWN Community
@@ -8,7 +8,7 @@
 Community版はネットワークに接続せず、USB／NTFSだけを保存先にします。
 
 ISOとSHA-256は[Releases](https://github.com/bunbun-digital/crispawn/releases)から取得できます。
-コードは[Apache-2.0](LICENSE)、名称・ロゴ・ブランド画像は[All rights reserved](examples/perfect-backup/assets/crispawn/LICENSE)です。
+コードは[Apache-2.0](LICENSE)、名称・ロゴ・ブランド画像は[All rights reserved](examples/crispawn/assets/crispawn/LICENSE)です。
 Linuxなどの第三者部品はそれぞれのライセンスを維持します。
 
 起動用USBはFAT32のEFI領域と、ラベルが`CRISPAWN`のNTFS領域を用意します。

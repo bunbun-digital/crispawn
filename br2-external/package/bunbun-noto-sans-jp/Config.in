@@ -1,5 +1,0 @@
-config BR2_PACKAGE_BUNBUN_NOTO_SANS_JP
-    bool "bunbun-noto-sans-jp"
-    help
-      Official Noto Sans JP Regular 2.004 OpenType font. The upstream
-      Japanese regional font is included without a UI-text-only subset.

@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install 1.95.0 --profile minimal
-      - run: cargo +1.95.0 test --locked --manifest-path examples/perfect-backup/rust/Cargo.toml
+      - run: cargo +1.95.0 test --locked --manifest-path examples/crispawn/rust/Cargo.toml
       - run: python3 -m pip install -r tools/requirements-config-contract.txt
       - run: python3 test/config/crispawn-config-contract.test.py
       - run: python3 tools/check-community.py

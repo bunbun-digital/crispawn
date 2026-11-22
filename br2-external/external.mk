@@ -1,2 +1,2 @@
-include $(sort $(wildcard $(BR2_EXTERNAL_BUNBUN_PATH)/package/*/*.mk))
+include $(sort $(wildcard $(BR2_EXTERNAL_CRISPAWN_PATH)/package/*/*.mk))
 

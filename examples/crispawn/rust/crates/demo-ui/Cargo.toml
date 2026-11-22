@@ -1,0 +1,12 @@
+[package]
+workspace = "../.."
+name = "crispawn-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+crispawn-ui.workspace = true
+crispawn-demo-model.workspace = true

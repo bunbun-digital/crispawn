@@ -17,8 +17,8 @@ import re
 import shutil
 import subprocess
 import tempfile
-from backup_qemu_common import run_guest
-from backup_log_evidence import verify_log_directory
+from crispawn_qemu import run_guest
+from crispawn_log_evidence import verify_log_directory
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,8 +51,8 @@ def main():
     def save():
         (output / 'state.json').write_text(json.dumps(state, indent=2) + '\n')
     save()
-    usb = module('usb', 'create-backup-usb-image.py')
-    settings = module('settings', 'configure-backup.py')
+    usb = module('usb', 'create-crispawn-usb-image.py')
+    settings = module('settings', 'configure-crispawn.py')
     host, env = usb.tools()
     xorriso = str(ROOT / 'build/os/host/bin/xorriso')
     def command(argv, **kw):
@@ -195,7 +195,7 @@ def main():
                                 assert re.fullmatch(r'data/data-[0-9]{6}\.pbk', name)
                                 (archive / name).write_bytes(cat('/' + archive_path + '/' + name))
                         verify_env = dict(os.environ, PYTHONPATH=str(ROOT / 'build/verifier-libs'))
-                        result = subprocess.run(['python3', ROOT / 'tools/check-backup-format.py', archive, '--source-file', source],
+                        result = subprocess.run(['python3', ROOT / 'tools/check-crispawn-format.py', archive, '--source-file', source],
                                                 env=verify_env, capture_output=True, timeout=120)
                         (folder / ('verify-' + str(index) + '.log')).write_bytes(result.stdout + result.stderr)
                         assert result.returncode == 0

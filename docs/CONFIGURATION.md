@@ -15,7 +15,7 @@ Schemas describe shared wire types; schema validity alone never enables a backen
   or consumption/progress forecast is used.
 - `logging.policy`: `always`, `on_error`, or `never`. Logs use the backup destination.
 
-Use `tools/configure-backup.py` to create a new configured ISO. Never edit an
+Use `tools/configure-crispawn.py` to create a new configured ISO. Never edit an
 existing image in place. On USB, an external `/perfect-backup.json` overrides
 the embedded `/etc/perfect-backup/live.json` as a whole; malformed overrides
 are rejected, not silently ignored. Internal legacy paths remain for Builder compatibility.

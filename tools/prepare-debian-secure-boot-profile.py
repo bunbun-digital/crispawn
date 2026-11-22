@@ -163,7 +163,7 @@ stop) : ;;
 *) exit 1 ;;
 esac
 '''.replace('MODULES', ' '.join(name for name in BASE_MODULES if name != 'efivarfs'))
-        put('overlay/etc/init.d/S12perfect-backup-signed', script.encode())
+        put('overlay/etc/init.d/S12crispawn-signed', script.encode())
         for name in ('kernel', 'shimx64.efi', 'grubx64.efi', 'mmx64.efi'):
             result = subprocess.run(['sbverify', '--list', output/name], capture_output=True, text=True)
             assert result.returncode == 0 and 'signature 1' in result.stdout

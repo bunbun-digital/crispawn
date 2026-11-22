@@ -29,8 +29,8 @@ contains product-specific binaries.
 ```sh
 export PATH="$PWD/build/toolchain/bin:$PATH"
 export CARGO_HOME="$PWD/build/cargo-home"
-cargo test --locked --manifest-path examples/perfect-backup/rust/Cargo.toml
-cargo fmt --all --check --manifest-path examples/perfect-backup/rust/Cargo.toml
+cargo test --locked --manifest-path examples/crispawn/rust/Cargo.toml
+cargo fmt --all --check --manifest-path examples/crispawn/rust/Cargo.toml
 python3 test/config/crispawn-config-contract.test.py
 ```
 

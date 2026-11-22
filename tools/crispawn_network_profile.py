@@ -31,7 +31,7 @@ def overlay(profile, output, include_network):
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, destination)
     removed_names = {p.name.split('.ko')[0] for p in removed}
-    startup = output / 'etc/init.d/S12perfect-backup-signed'
+    startup = output / 'etc/init.d/S12crispawn-signed'
     lines = startup.read_text().splitlines()
     for i, line in enumerate(lines):
         if line.strip().startswith('for module in '):
@@ -52,4 +52,4 @@ def overlay(profile, output, include_network):
 def network_asset(name):
     """The preserved base's firmware directory contains only radio firmware."""
     return (name.startswith('lib/firmware/') or name == 'lib/firmware'
-            or name == 'usr/share/bunbun/wifi-firmware.json')
+            or name == 'usr/share/crispawn/wifi-firmware.json')

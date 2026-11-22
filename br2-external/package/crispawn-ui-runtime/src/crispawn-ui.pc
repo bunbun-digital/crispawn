@@ -1,0 +1,10 @@
+prefix=/usr
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: crispawn-ui
+Description: CRISPAWN LVGL framebuffer and Japanese font runtime
+Version: 1.2
+Requires: lvgl = 9.6.0
+Libs: -L${libdir} -lcrispawn-ui
+Cflags: -I${includedir}

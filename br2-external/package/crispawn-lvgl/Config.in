@@ -1,0 +1,12 @@
+config BR2_PACKAGE_CRISPAWN_LVGL
+    bool "crispawn-lvgl"
+    depends on BR2_INSTALL_LIBSTDCPP
+    depends on !BR2_STATIC_LIBS
+    select BR2_PACKAGE_FREETYPE
+    select BR2_PACKAGE_LIBEVDEV
+    help
+      LVGL Open shared library configured for software framebuffer drawing,
+      evdev keyboard input and FreeType fonts. No display server is needed.
+
+comment "crispawn-lvgl needs a C++ toolchain and shared libraries"
+    depends on !BR2_INSTALL_LIBSTDCPP || BR2_STATIC_LIBS

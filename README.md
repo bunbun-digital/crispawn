@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="examples/perfect-backup/assets/crispawn/logo-hero.png" alt="CRISPAWN" width="860">
+  <img src="examples/crispawn/assets/crispawn/logo-hero.png" alt="CRISPAWN" width="860">
 </p>
 
 # CRISPAWN Community
@@ -11,7 +11,7 @@ hard disk and restore saved copies. The community edition works offline.
 Download the ISO and its SHA-256 file from
 [Releases](https://github.com/bunbun-digital/crispawn/releases).
 The original software is [Apache-2.0](LICENSE). The CRISPAWN name, logos and
-branded artwork are [All rights reserved](examples/perfect-backup/assets/crispawn/LICENSE).
+branded artwork are [All rights reserved](examples/crispawn/assets/crispawn/LICENSE).
 Third-party components keep their own licenses; the ISO is a mixed-license distribution.
 
 ## Use
@@ -46,9 +46,9 @@ official community builds, not a restriction on third-party modifications.
 
 See [BUILDING.md](BUILDING.md), [configuration](docs/CONFIGURATION.md),
 [architecture](docs/ARCHITECTURE.md) and [licensing](docs/LICENSING.md).
-Runtime code is split into the [copy and restore engine](examples/perfect-backup/rust/crates/engine),
-[application UI](examples/perfect-backup/rust/crates/live-ui) and
-[shared UI SDK](sdk/rust/bunbun-ui).
+Runtime code is split into the [copy and restore engine](examples/crispawn/rust/crates/engine),
+[application UI](examples/crispawn/rust/crates/live-ui) and
+[shared UI SDK](sdk/rust/crispawn-ui).
 No old private repository, development ISO, SDK or Windows relay is required.
 
 This is an early development release. See each release's test report for the

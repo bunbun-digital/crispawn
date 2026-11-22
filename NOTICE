@@ -5,7 +5,7 @@ Original contributions also retain their existing copyright notices.
 Original software, build integration and documentation are licensed under
 Apache License 2.0, except where a more specific third-party notice applies.
 The CRISPAWN name, logo and branded artwork are separately reserved assets;
-see examples/perfect-backup/assets/crispawn/LICENSE.
+see examples/crispawn/assets/crispawn/LICENSE.
 Linux, Buildroot, GRUB, shim, LVGL, fonts, Rust and other dependencies retain
 their respective licenses. The complete ISO is a mixed-license distribution,
 not a relicensing of those components under Apache-2.0.

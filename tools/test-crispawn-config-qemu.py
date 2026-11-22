@@ -18,8 +18,8 @@ import shutil
 import subprocess
 import tempfile
 
-from backup_qemu_common import run_guest
-from backup_log_evidence import verify_log_directory
+from crispawn_qemu import run_guest
+from crispawn_log_evidence import verify_log_directory
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,12 +40,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--iso', type=Path, required=True)
     parser.add_argument('--work', type=Path, required=True)
-    parser.add_argument('--secure-boot-profile', type=Path, default=ROOT / 'build-perfect-backup-secure-profile-debian-v2')
+    parser.add_argument('--secure-boot-profile', type=Path, default=ROOT / 'build-crispawn-secure-profile-debian-v2')
     args = parser.parse_args()
     output = args.work.resolve(); output.mkdir(parents=True, exist_ok=False)
     assert args.iso.is_file() and not args.iso.is_symlink()
     assert shutil.disk_usage(output).free > 12 * 1024**3
-    usb = module('usb', 'create-backup-usb-image.py')
+    usb = module('usb', 'create-crispawn-usb-image.py')
     host, env = usb.tools()
     state = dict(phase='preparing', physical_devices=False, hyperv_tested=False,
                  qemu_real_guest=True, secure_boot=True, cpus=2, memory_mib=4096, checks=[])
@@ -130,7 +130,7 @@ def main():
                 name=row['relative_path']; assert re.fullmatch(r'data/data-[0-9]{6}\.pbk',name)
                 (archive/name).write_bytes(cat('/'+disk['archive']+'/'+name))
         verify_env=dict(os.environ,PYTHONPATH=str(ROOT/'build/verifier-libs'))
-        r=subprocess.run(['python3',ROOT/'tools/check-backup-format.py',archive,'--source-file',source],env=verify_env,capture_output=True,text=True,timeout=120)
+        r=subprocess.run(['python3',ROOT/'tools/check-crispawn-format.py',archive,'--source-file',source],env=verify_env,capture_output=True,text=True,timeout=120)
         (copy/'independent-verification.log').write_text(r.stdout+r.stderr); assert r.returncode==0,r.stderr
         for directory in listing('/crispawn/logs'):
             folder=copy/'logs'/directory; folder.mkdir(parents=True)

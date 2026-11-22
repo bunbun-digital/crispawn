@@ -18,8 +18,8 @@ import shutil
 import subprocess
 import tempfile
 
-from backup_qemu_common import run_guest
-from backup_log_evidence import verify_log_directory
+from crispawn_qemu import run_guest
+from crispawn_log_evidence import verify_log_directory
 
 ROOT = Path(__file__).resolve().parents[1]
 LAYOUT = {"kind": "crispawn.media_layout", "schema_version": 1,
@@ -47,8 +47,8 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     assert args.iso.is_file() and not args.iso.is_symlink()
     assert shutil.disk_usage(output).free > 12 << 30
-    usb = module('usb', 'create-backup-usb-image.py')
-    settings = module('settings', 'configure-backup.py')
+    usb = module('usb', 'create-crispawn-usb-image.py')
+    settings = module('settings', 'configure-crispawn.py')
     host, env = usb.tools()
     sdk = ROOT / 'build/os/host/bin'
     profile_path = ROOT / usb._boot.DEFAULT_SECURE_PROFILE_NAME
@@ -177,7 +177,7 @@ def main():
                 assert re.fullmatch(r'data/data-[0-9]{6}\.pbk', name)
                 (archive / name).write_bytes(cat(prefix + name))
         verify_env = dict(os.environ, PYTHONPATH=str(ROOT / 'build/verifier-libs'))
-        result = subprocess.run(['python3', ROOT / 'tools/check-backup-format.py', archive, '--source-file', source],
+        result = subprocess.run(['python3', ROOT / 'tools/check-crispawn-format.py', archive, '--source-file', source],
                                 env=verify_env, capture_output=True, timeout=120)
         (copied / 'independent-verification.log').write_bytes(result.stdout + result.stderr)
         assert result.returncode == 0, result.stderr.decode(errors='replace')

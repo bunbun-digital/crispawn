@@ -4,15 +4,16 @@
 from pathlib import Path
 import json
 import subprocess
+import tomllib
 
 ROOT=Path(__file__).resolve().parents[1]
 
 def main():
     assert 'Apache License' in (ROOT/'LICENSE').read_text()
-    assets=ROOT/'examples/perfect-backup/assets/crispawn'
+    assets=ROOT/'examples/crispawn/assets/crispawn'
     assert 'All rights reserved' in (assets/'LICENSE').read_text()
     assert 'not licensed' in (assets/'LICENSE').read_text()
-    engine=ROOT/'examples/perfect-backup/rust/crates/engine'
+    engine=ROOT/'examples/crispawn/rust/crates/engine'
     assert not (engine/'src/live_network.rs').exists()
     manifest=(engine/'Cargo.toml').read_text()
     assert 'pbkdf2' not in manifest and 'sha1' not in manifest
@@ -25,6 +26,10 @@ def main():
     for path in filter(None,tracked):
         assert not path.startswith(forbidden),path
         assert not path.endswith(('.iso','.vhdx','.exe','.dll','.pfx','.key')),path
+        assert 'perfect-backup' not in path and 'bunbun-ui' not in path,path
+        if path.endswith('Cargo.toml'):
+            package=tomllib.loads((ROOT/path).read_text()).get('package')
+            if package:assert package['name'].startswith('crispawn'),path
         if Path(path).suffix in ('.rs','.c','.h','.py','.mk','.yaml'):
             for line in (ROOT/path).read_text().splitlines():
                 if line.lstrip().startswith(('// SPDX','/* SPDX','# SPDX')):
