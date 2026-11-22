@@ -15,7 +15,8 @@ implementation and contains no connection worker or unlock flag.
 Its runtime rejects all explicit network modes and SMB/S3 destinations.
 The Debian signed kernel and third-party driver licenses remain independent.
 
-The public `crispawn-builder` repository is maintained separately and is not
-moved into Pro. Runtime names `perfect-backup-*`, versioned archive contracts,
-legacy path reading and the C UI ABI are retained in this migration.
+The public [CRISPAWN Builder](https://github.com/bunbun-digital/crispawn-builder)
+repository is maintained separately. Boot configuration interfaces, versioned
+archive contracts and the C UI ABI retain their existing identifiers; see
+[integration compatibility](COMPATIBILITY.md). These identifiers are not product names.
 

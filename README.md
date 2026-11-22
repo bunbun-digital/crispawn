@@ -46,8 +46,9 @@ official community builds, not a restriction on third-party modifications.
 
 See [BUILDING.md](BUILDING.md), [configuration](docs/CONFIGURATION.md),
 [architecture](docs/ARCHITECTURE.md) and [licensing](docs/LICENSING.md).
-The current runtime source remains under `examples/perfect-backup/rust/` to
-preserve existing package names, runtime paths and archive compatibility.
+Runtime code is split into the [copy and restore engine](examples/perfect-backup/rust/crates/engine),
+[application UI](examples/perfect-backup/rust/crates/live-ui) and
+[shared UI SDK](sdk/rust/bunbun-ui).
 No old private repository, development ISO, SDK or Windows relay is required.
 
 This is an early development release. See each release's test report for the

@@ -18,8 +18,9 @@ the Buildroot-pinned Bootlin musl compiler, and Debian signed packages.
 Checksums, the Debian kernel ABI and signatures are verified before composition.
 The Rust Cargo.lock is mandatory. No preserved CRISPAWN ISO or private SDK is used.
 
-Outputs are in `artifacts/perfect-backup-live/`. Logs, toolchains and temporary
-builds are in ignored `build/` and `.orchestrator*/` directories. Allow at least
+The build prints its report path; the report identifies the generated ISO.
+Logs, toolchains and temporary builds are in ignored `build/` and
+`.orchestrator*/` directories. Allow at least
 12 GiB free for the build and guest tests, and monitor free space. The default
 ISO limit is 100,000,000 bytes. A download cache or clean upstream Buildroot
 checkout may be reused with `--download-cache` and `--buildroot-source`; neither
