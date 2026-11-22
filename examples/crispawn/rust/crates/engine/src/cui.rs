@@ -118,7 +118,7 @@ fn line(reader: &mut impl BufRead) -> Result<Option<String>> {
 fn menu(direct: bool) -> Result<Operation> {
     crispawn_engine::supervisor::phase("MENU");
     eprintln!(
-        "perfect backup\n  [B] バックアップ\n  [R] リストア\n入力待ち（カウントダウンなし）{}:",
+        "CRISPAWN\n  [B] コピー\n  [R] 復元\n入力待ち（カウントダウンなし）{}:",
         if direct {
             "・Enter不要"
         } else {
@@ -158,7 +158,7 @@ fn menu(direct: bool) -> Result<Operation> {
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
-        println!("perfect backup CUI (explicit configured source/target adapter)\n  crispawn --config FILE [--operation backup|resume|restore|verify]\n  crispawn --config FILE --menu\nOptions: --interactive (P=pause/resume, C=cancel; terminal keys need no Enter), --json, --no-gui\nPipes retain line commands: pause/resume/cancel + Enter.\nDefault: unattended backup, no countdown or required input. SIGINT/SIGTERM cancel cooperatively.\nRelative paths use the config directory. Files and whole devices use separate explicit configuration fields. No host poweroff.");
+        println!("CRISPAWN CUI (explicit configured source/target adapter)\n  crispawn --config FILE [--operation backup|resume|restore|verify]\n  crispawn --config FILE --menu\nOptions: --interactive (P=pause/resume, C=cancel; terminal keys need no Enter), --json, --no-gui\nPipes retain line commands: pause/resume/cancel + Enter.\nDefault: unattended backup, no countdown or required input. SIGINT/SIGTERM cancel cooperatively.\nRelative paths use the config directory. Files and whole devices use separate explicit configuration fields. No host poweroff.");
         return;
     }
     match crispawn_engine::supervisor::entry(crispawn_engine::supervisor::Mode::Cui) {
