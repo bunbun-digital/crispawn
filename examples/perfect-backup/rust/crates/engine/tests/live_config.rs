@@ -399,7 +399,12 @@ fn future_backends_fail_closed_without_credential_read_or_network_operations() {
     }
     let mut v = baseline();
     v["network"] = json!({"mode":"auto","wifi_profiles":[]});
-    assert_eq!(live_config::parse(&serde_json::to_vec(&v).unwrap()).unwrap_err().code, "UNSUPPORTED_CAPABILITY");
+    assert_eq!(
+        live_config::parse(&serde_json::to_vec(&v).unwrap())
+            .unwrap_err()
+            .code,
+        "UNSUPPORTED_CAPABILITY"
+    );
 }
 #[test]
 fn legacy_defaults_fixed_tuning_and_explicit_restore_are_preserved() {

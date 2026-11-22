@@ -7,9 +7,17 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Network {
     None {},
-    Auto { wifi_profiles: Vec<serde_json::Value> },
-    Ethernet { ipv4: serde_json::Value },
-    Wifi { country: String, ipv4: serde_json::Value, wifi_profile: serde_json::Value },
+    Auto {
+        wifi_profiles: Vec<serde_json::Value>,
+    },
+    Ethernet {
+        ipv4: serde_json::Value,
+    },
+    Wifi {
+        country: String,
+        ipv4: serde_json::Value,
+        wifi_profile: serde_json::Value,
+    },
 }
 impl Network {
     pub fn mode(&self) -> &'static str {
@@ -21,8 +29,13 @@ impl Network {
         }
     }
     pub fn validate(&self) -> Result<()> {
-        if matches!(self, Self::None {}) { Ok(()) }
-        else { Err(Error::new("UNSUPPORTED_CAPABILITY", "community edition has no network support")) }
+        if matches!(self, Self::None {}) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                "UNSUPPORTED_CAPABILITY",
+                "community edition has no network support",
+            ))
+        }
     }
 }
-

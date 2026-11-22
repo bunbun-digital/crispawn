@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-language contract cases; no ISO, network, VM or device operations.
 
-Copyright (c) 2026 bunbun-liveos contributors. All rights reserved.
+Copyright (c) 2026 bunbun-liveos contributors. Licensed under Apache-2.0.
 """
 import copy
 import importlib.util

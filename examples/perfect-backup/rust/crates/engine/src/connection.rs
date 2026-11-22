@@ -8,6 +8,7 @@ pub trait Readiness {
 }
 pub struct Local;
 impl Readiness for Local {
-    fn poll(&mut self) -> Result<bool> { Ok(true) }
+    fn poll(&mut self) -> Result<bool> {
+        Ok(true)
+    }
 }
-

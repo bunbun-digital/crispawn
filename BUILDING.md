@@ -29,6 +29,7 @@ contains product-specific binaries.
 export PATH="$PWD/build/toolchain/bin:$PATH"
 export CARGO_HOME="$PWD/build/cargo-home"
 cargo test --locked --manifest-path examples/perfect-backup/rust/Cargo.toml
+cargo fmt --all --check --manifest-path examples/perfect-backup/rust/Cargo.toml
 python3 test/config/crispawn-config-contract.test.py
 ```
 
@@ -36,7 +37,7 @@ A functional guest test also needs QEMU, OVMF, ntfs-3g and mtools. Tests create
 new ordinary disk image files and do not format physical devices.
 
 ```sh
-python3 tools/test-crispawn-media-qemu.py --iso artifacts/perfect-backup-live/crispawn-community-0.1.0-alpha.1-x86_64.iso --work .orchestrator-test/unique-run
+python3 tools/test-crispawn-media-qemu.py --iso /path/to/the/generated.iso --work .orchestrator-test/unique-run
 ```
 
 The ISO uses signed Debian kernel/shim/GRUB with Buildroot userspace. The

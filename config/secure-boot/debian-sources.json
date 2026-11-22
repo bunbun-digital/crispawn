@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "package": "linux",
+      "version": "6.12.117-1",
+      "url": "https://security.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.117-1.dsc",
+      "dsc_sha256": "041c7af261546dbad4ee57ccb237f02a8697b762be34aed2e1617ed49595942a",
+      "files": [
+        {
+          "name": "linux_6.12.117.orig.tar.xz",
+          "sha256": "77cf7a48a73aeaa7cf4f94cb6d17f8fe545bf33a5dd8a56d6428db3a54645c74",
+          "bytes": 151928652,
+          "url": "https://security.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.117.orig.tar.xz"
+        },
+        {
+          "name": "linux_6.12.117-1.debian.tar.xz",
+          "sha256": "e3f3bec0723f780d9ef2a2b3215aea25d34c61cd884f1f858c9708a846c4f8f9",
+          "bytes": 1999304,
+          "url": "https://security.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.117-1.debian.tar.xz"
+        }
+      ]
+    },
+    {
+      "package": "linux-signed-amd64",
+      "version": "6.12.117+1",
+      "url": "https://security.debian.org/debian-security/pool/updates/main/l/linux-signed-amd64/linux-signed-amd64_6.12.117+1.dsc",
+      "dsc_sha256": "e9a3048b7a94917264bb8f2a61836c658542fe15c730d9e907750e8dfceaf0eb",
+      "files": [
+        {
+          "name": "linux-signed-amd64_6.12.117+1.tar.xz",
+          "sha256": "d4c198925c56001d03234876916805d433645314999f000ca1a6e494325da735",
+          "bytes": 1120580,
+          "url": "https://security.debian.org/debian-security/pool/updates/main/l/linux-signed-amd64/linux-signed-amd64_6.12.117+1.tar.xz"
+        }
+      ]
+    },
+    {
+      "package": "grub2",
+      "version": "2.12-9+deb13u4",
+      "url": "https://deb.debian.org/debian/pool/main/g/grub2/grub2_2.12-9+deb13u4.dsc",
+      "dsc_sha256": "157c784912981f24499c917b2a25b6aecb9487065156efbcae97f58798e97f36",
+      "files": [
+        {
+          "name": "grub2_2.12.orig.tar.xz",
+          "sha256": "f3c97391f7c4eaa677a78e090c7e97e6dc47b16f655f04683ebd37bef7fe0faa",
+          "bytes": 6675608,
+          "url": "https://deb.debian.org/debian/pool/main/g/grub2/grub2_2.12.orig.tar.xz"
+        },
+        {
+          "name": "grub2_2.12-9+deb13u4.debian.tar.xz",
+          "sha256": "14c4765993f73966dad8dddff258824fe9336395fd852934d03a062e71248869",
+          "bytes": 1130468,
+          "url": "https://deb.debian.org/debian/pool/main/g/grub2/grub2_2.12-9+deb13u4.debian.tar.xz"
+        }
+      ]
+    },
+    {
+      "package": "grub-efi-amd64-signed",
+      "version": "1+2.12+9+deb13u4",
+      "url": "https://deb.debian.org/debian/pool/main/g/grub-efi-amd64-signed/grub-efi-amd64-signed_1+2.12+9+deb13u4.dsc",
+      "dsc_sha256": "79ded8924e0480794470fa1716f5bfe1ea33ed720029fededb0718ed253c6a41",
+      "files": [
+        {
+          "name": "grub-efi-amd64-signed_1+2.12+9+deb13u4.tar.xz",
+          "sha256": "484a21c61c51d6c68e0e1eb397074474a81e404df93e2943a94b41adae72434f",
+          "bytes": 4800,
+          "url": "https://deb.debian.org/debian/pool/main/g/grub-efi-amd64-signed/grub-efi-amd64-signed_1+2.12+9+deb13u4.tar.xz"
+        }
+      ]
+    },
+    {
+      "package": "shim",
+      "version": "16.1-2~deb13u1",
+      "url": "https://deb.debian.org/debian/pool/main/s/shim/shim_16.1-2~deb13u1.dsc",
+      "dsc_sha256": "d5748139a9a7fdd8e4c1ecd89b0156c3d226b21d393be495c2a28575817a0b90",
+      "files": [
+        {
+          "name": "shim_16.1.orig.tar.bz2",
+          "sha256": "46319cd228d8f2c06c744241c0f342412329a7c630436fce7f82cf6936b1d603",
+          "bytes": 2348998,
+          "url": "https://deb.debian.org/debian/pool/main/s/shim/shim_16.1.orig.tar.bz2"
+        },
+        {
+          "name": "shim_16.1.orig.tar.bz2.asc",
+          "sha256": "05086f18c1f44a779efc20898434398812a90163a33dbba9105af0e64f46bb97",
+          "bytes": 833,
+          "url": "https://deb.debian.org/debian/pool/main/s/shim/shim_16.1.orig.tar.bz2.asc"
+        },
+        {
+          "name": "shim_16.1-2~deb13u1.debian.tar.xz",
+          "sha256": "2d33fb67f05793f48e5d7696c3cd64229a2275abd3a9d18aed9db2f137f0e641",
+          "bytes": 58992,
+          "url": "https://deb.debian.org/debian/pool/main/s/shim/shim_16.1-2~deb13u1.debian.tar.xz"
+        }
+      ]
+    },
+    {
+      "package": "shim-signed",
+      "version": "1.51~1+deb13u1",
+      "url": "https://deb.debian.org/debian/pool/main/s/shim-signed/shim-signed_1.51~1+deb13u1.dsc",
+      "dsc_sha256": "29b8f65c870cb2a735536355c092bb07348342c6a9b16165092435d3faf940d0",
+      "files": [
+        {
+          "name": "shim-signed_1.51~1+deb13u1.tar.xz",
+          "sha256": "a9c614e6d69caf950359ac800c6df7125169f95b44073e378943b58935d4e400",
+          "bytes": 771352,
+          "url": "https://deb.debian.org/debian/pool/main/s/shim-signed/shim-signed_1.51~1+deb13u1.tar.xz"
+        }
+      ]
+    },
+    {
+      "package": "shim-helpers-amd64-signed",
+      "version": "1+16.1+2~deb13u1",
+      "url": "https://deb.debian.org/debian/pool/main/s/shim-helpers-amd64-signed/shim-helpers-amd64-signed_1+16.1+2~deb13u1.dsc",
+      "dsc_sha256": "1524ae8396a816f48c95f524fd8a7ab9f5a5e3be86cbf451506e3745e93f497b",
+      "files": [
+        {
+          "name": "shim-helpers-amd64-signed_1+16.1+2~deb13u1.tar.xz",
+          "sha256": "dbf7d12ff37f4e15ab1d094d3de4afc6286fb4083fa5d9cb38f28244d0fa0ebc",
+          "bytes": 4892,
+          "url": "https://deb.debian.org/debian/pool/main/s/shim-helpers-amd64-signed/shim-helpers-amd64-signed_1+16.1+2~deb13u1.tar.xz"
+        }
+      ]
+    }
+  ]
+}
