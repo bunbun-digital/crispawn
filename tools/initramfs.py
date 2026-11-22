@@ -81,3 +81,7 @@ def boot_platforms(binary, iso):
 def ensure_absent(paths):
     if any(p.exists() or p.is_symlink() for p in paths):
         raise ConfigError('Output or sidecar already exists; choose a new output filename.')
+
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
