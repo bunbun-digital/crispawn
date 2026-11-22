@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-/* SPDX-License-Identifier: LicenseRef-Bunbun-Proprietary */
 /* Generic LVGL bridge. No product strings, layouts or progress calculations. */
 #include "bunbun/ui.h"
 #include "bunbun/widgets.h"

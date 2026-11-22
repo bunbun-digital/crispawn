@@ -25,6 +25,10 @@ def main():
     for path in filter(None,tracked):
         assert not path.startswith(forbidden),path
         assert not path.endswith(('.iso','.vhdx','.exe','.dll','.pfx','.key')),path
+        if Path(path).suffix in ('.rs','.c','.h','.py','.mk','.yaml'):
+            for line in (ROOT/path).read_text().splitlines():
+                if line.lstrip().startswith(('// SPDX','/* SPDX','# SPDX')):
+                    assert 'LicenseRef-Bunbun-Proprietary' not in line,path
     print('COMMUNITY_SOURCE_BOUNDARY_OK')
 
 if __name__=='__main__':main()

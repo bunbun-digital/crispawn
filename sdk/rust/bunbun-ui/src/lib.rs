@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-License-Identifier: LicenseRef-Bunbun-Proprietary
 //! Single-threaded, scene-owned handles over the OS C ABI. No LVGL structs or
 //! raw pointers cross the safe API. Objects cannot be deleted independently.
 #![deny(unsafe_op_in_unsafe_fn)]

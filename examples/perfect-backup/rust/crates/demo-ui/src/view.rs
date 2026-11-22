@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-License-Identifier: LicenseRef-Bunbun-Proprietary
 #![forbid(unsafe_code)]
 use bunbun_ui::{
     Align::*,

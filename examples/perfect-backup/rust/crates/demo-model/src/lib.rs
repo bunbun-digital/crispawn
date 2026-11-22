@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-License-Identifier: LicenseRef-Bunbun-Proprietary
 #![forbid(unsafe_code)]
 
 //! Display simulation only. No storage I/O or dependency on a GUI toolkit.

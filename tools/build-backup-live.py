@@ -273,9 +273,18 @@ def main():
         for source, target in [('GPL-2.0-only.txt','GPL-2'),('GPL-3.0-only.txt','GPL-3'),('LGPL-2.1-only.txt','LGPL-2.1')]:
             put('usr/share/common-licenses/'+target,(ROOT/'LICENSES'/source).read_bytes())
         notices = toolchain/'share/doc/rust'
-        for name in ['LICENSE-APACHE', 'LICENSE-MIT', 'COPYRIGHT.html']:
+        for name in ['LICENSE-APACHE', 'LICENSE-MIT', 'COPYRIGHT.html', 'COPYRIGHT-library.html']:
             if (notices/name).is_file():
                 put('usr/share/licenses/rust-standard-library/'+name,(notices/name).read_bytes())
+        for notice in sorted((notices/'licenses').rglob('*')):
+            if notice.is_file():
+                put('usr/share/licenses/rust-standard-library/licenses/'+notice.relative_to(notices/'licenses').as_posix(),notice.read_bytes())
+        fonts = sdk/'build/bunbun-lvgl-9.6.0/scripts/generators/built_in_font/font_license'
+        for font, filename in [('Montserrat','OFL.txt'),('FontAwesome5','LICENSE.txt')]:
+            notice = fonts/font/filename
+            if not notice.is_file():
+                raise ValueError('Bundled LVGL font license is missing: '+font)
+            put('usr/share/licenses/lvgl-fonts/'+font+'/'+filename,notice.read_bytes())
         legal = sdk/'legal-info/licenses'
         for notice in sorted(legal.rglob('*')):
             if notice.is_file():

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-/* SPDX-License-Identifier: LicenseRef-Bunbun-Proprietary */
 #ifndef BUNBUN_UI_H
 #define BUNBUN_UI_H
 

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-/* SPDX-License-Identifier: LicenseRef-Bunbun-Proprietary */
 /* This file is part of the OS SDK; consumers must use this exact configuration. */
 #ifndef LV_CONF_H
 #define LV_CONF_H

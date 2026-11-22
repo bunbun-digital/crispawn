@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-License-Identifier: LicenseRef-Bunbun-Proprietary
 use std::ffi::c_char;
 #[repr(C)]
 pub struct Scene {
