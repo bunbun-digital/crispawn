@@ -195,6 +195,9 @@ def main():
             entries = [e for e in entries if not e[0].startswith(("lib/modules/", "usr/lib/modules/"))]
         if args.network_drivers == 'none':
             entries = [e for e in entries if not network_asset(e[0])]
+        entries = [e for e in entries if e[0] not in {
+            'etc/init.d/S40network','etc/init.d/S41bunbun-wifi',
+            'etc/network/interfaces','etc/crispawn/credentials.json'}]
         index = {e[0]: e for e in entries}
         assert "etc/bunbun/wifi.conf" not in index, "credential-bearing base ISO refused"
         inode = max(e[1][0] for e in entries) + 1
