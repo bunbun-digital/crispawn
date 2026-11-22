@@ -45,7 +45,7 @@ def main():
     parser.add_argument("--rootfs", type=Path, required=True)
     parser.add_argument("--toolchain", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
-    parser.add_argument("--release-id", default="0.1.0-alpha.1")
+    parser.add_argument("--release-id", default="0.1.0-alpha.2")
     parser.add_argument("--kernel", type=Path, help="legacy custom kernel, requires --unsigned-kernel")
     
     parser.add_argument("--target-dir", type=Path, default=Path("/tmp/.orchestrator-crispawn-live-target"))
@@ -53,7 +53,7 @@ def main():
     security.add_argument("--secure-boot-profile", type=Path, help="verified signed profile; defaults to the pinned Debian profile")
     security.add_argument("--unsigned-kernel", action="store_true", help="explicit legacy unsigned-kernel experiment; never the default")
     parser.add_argument("--network-drivers", choices=['none'], default='none',
-                        help="standard ISO has no network hardware drivers; full explicitly enables network modules")
+                        help="Community includes no network hardware drivers")
     parser.add_argument("--credentials", type=Path, help="explicitly embed only referenced private Wi-Fi credentials")
     parser.add_argument("--config", type=Path, default=ROOT / "config/crispawn/examples/live-v2-usb.json",
                         help="JSON settings embedded as /etc/perfect-backup/live.json")
