@@ -97,7 +97,8 @@ def main():
     target = args.target_dir.resolve()
     toolchain = args.toolchain.resolve(strict=True)
     sysroot = sdk / "host/x86_64-buildroot-linux-musl/sysroot"
-    cc = sdk / "host/bin/x86_64-buildroot-linux-musl-gcc"
+    cc = next(p for p in [sdk/"host/bin/x86_64-linux-gcc", sdk/"host/bin/x86_64-buildroot-linux-musl-gcc"] if p.is_file())
+    ar = cc.with_name(cc.name.removesuffix("gcc")+"ar")
     paths = [ROOT / "tools/build-backup-live.py", ROOT / 'tools/crispawn_network_profile.py', ROOT / 'tools/configure-backup.py', ROOT / "tools/initramfs.py", ROOT / "tools/crispawn_boot.py", ROOT / "tools/prepare-crispawn-asset.py", PROJECT / "Cargo.lock", PROJECT / "Cargo.toml"]
     if profile:
         paths.append(ROOT / "tools/prepare-debian-secure-boot-profile.py")
@@ -126,7 +127,7 @@ def main():
     env.update(PATH=str(toolchain / "bin") + os.pathsep + env["PATH"],
                CARGO_HOME=os.environ["CARGO_HOME"], CARGO_TARGET_DIR=str(target),
                PKG_CONFIG_SYSROOT_DIR=str(sysroot), PKG_CONFIG_LIBDIR=str(sysroot / "usr/lib/pkgconfig"),
-               CC_x86_64_unknown_linux_musl=str(cc), AR_x86_64_unknown_linux_musl=str(sdk / "host/bin/x86_64-buildroot-linux-musl-ar"),
+               CC_x86_64_unknown_linux_musl=str(cc), AR_x86_64_unknown_linux_musl=str(ar),
                CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=str(cc),
                CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=-crt-static -C link-arg=-Wl,-rpath-link," + str(sysroot / "usr/lib"))
 
@@ -335,7 +336,7 @@ def main():
             assert digest(profile / "profile.json") == state["signed_profile"]["manifest_sha256"]
             assert all(digest(profile / name) == h for name, h in profile_state["files"].items())
         artifacts = ROOT / "artifacts/perfect-backup-live"; artifacts.mkdir(parents=True, exist_ok=True)
-        output = artifacts / ("crispawn-community-" + args.release_id + "-x86_64.iso")
+        output = artifacts / ("crispawn-community-" + args.release_id + "-" + identifier + "-x86_64.iso")
         with os.fdopen(os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as f, image.open("rb") as src:
             shutil.copyfileobj(src, f)
         state.update(phase="complete", iso=str(output), iso_bytes=output.stat().st_size, iso_sha256=digest(output),

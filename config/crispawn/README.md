@@ -1,7 +1,7 @@
 # CRISPAWN 設定契約
 
-正本は[設定ファイル仕様](../../docs/CRISPAWN-CONFIG-SPEC.md)。
-独自の仕様・Schema・例・検証コードはAll rights reservedです。
+正本は[設定ファイル仕様](../../docs/CONFIGURATION.md)。
+独自の仕様・Schema・例・検証コードはApache-2.0です。
 
 | 場所 | 内容 |
 | --- | --- |
@@ -25,7 +25,7 @@ v1のgolden fileは旧reader向けの出力例であり、新ファイル用chec
 
 SchemaはJSON Schema Draft 2020-12、参照は固定のURNです。外部への問い合わせは不要です。
 byte長、相互参照、対応release、v1変換はSchemaだけでは検査しきれないため、仕様の意味規則も実装してください。
-現行の[標準ISO](../../docs/CRISPAWN-NETWORK.md)はネットワークdriverなしです。
+現行の[標準ISO](../../docs/ARCHITECTURE.md)はネットワークdriverなしです。
 network設定を保存できることと、そのISO単独で接続できることを区別し、capabilityと追加moduleを照合してください。
 Schemaの`additionalProperties:false`等の意味は[公式のobject仕様](https://json-schema.org/understanding-json-schema/reference/object)を参照してください。
 

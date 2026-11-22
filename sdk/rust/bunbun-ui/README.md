@@ -37,7 +37,7 @@ pause.shortcut('p')?;
 C ABIは[`bunbun/widgets.h`](../../../br2-external/package/bunbun-ui-runtime/src/bunbun/widgets.h)に定義し、旧`ui.h` APIは維持します。
 既存CコードでLVGLの初期化・破棄を並行して行う利用は対象外です。Rustからのsafeな利用でもC実装の全不具合を排除するものではありません。
 build時は`BUNBUN_UI_LIB_DIR`と、同じOS SDKのtarget/linkerをそろえます。[製品のbuild手順](../../../examples/perfect-backup/README.md)を参照してください。
-独自部分はAll rights reserved、LVGL等の第三者部分の条件は維持します。
+独自部分はApache-2.0、LVGL等の第三者部分の条件は維持します。
 
 `Kind::Image`と`Widget::image_rgba()`はRGBAをscene側へcopyし、画面に収まる同一倍率で中央表示します。
 `Widget::hidden()`で画面を同じsession内で切り替えられます。PNG decodeはAPIに含まず、製品のbuild時に変換します。

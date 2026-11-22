@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -50,6 +51,7 @@ def main():
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 1, 8))
     parser.add_argument('--release-id', default='0.1.0-alpha.1')
     args = parser.parse_args()
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", args.release_id), "invalid release ID"
     work = args.work_dir.resolve()
     assert work != ROOT and not ROOT.is_relative_to(work)
     work.mkdir(parents=True, exist_ok=True)
