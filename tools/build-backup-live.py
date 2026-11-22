@@ -107,6 +107,7 @@ def main():
     for directory in [PROJECT / "crates", ROOT / "sdk/rust/bunbun-ui", ROOT / "br2-external/package/bunbun-ui-runtime/src",
                       ROOT / "examples/perfect-backup/br2-external", ROOT / "examples/perfect-backup/configs", ROOT / "examples/perfect-backup/assets"]:
         paths += [p for p in directory.rglob("*") if p.is_file()]
+    paths += [p for p in (ROOT/'LICENSES').rglob('*') if p.is_file()]
     fingerprints = {str(p.relative_to(ROOT)): digest(p) for p in sorted(set(paths))}
     state = {"phase": "building", "id": identifier, "work": str(work), "inputs": fingerprints,
              "embedded_config_sha256": config_hash,
@@ -265,6 +266,12 @@ def main():
             for notice in sorted(folder.rglob('*')):
                 if notice.is_file() and notice.name.upper().startswith(('LICENSE','LICENCE','COPYING','NOTICE','COPYRIGHT')):
                     put(prefix + '/' + notice.relative_to(folder).as_posix(), notice.read_bytes())
+        # The external toolchain's runtime libraries have their own notices.
+        for notice in sorted((ROOT/'LICENSES').iterdir()):
+            if notice.is_file():
+                put('usr/share/licenses/runtime-libraries/'+notice.name,notice.read_bytes())
+        for source, target in [('GPL-2.0-only.txt','GPL-2'),('GPL-3.0-only.txt','GPL-3'),('LGPL-2.1-only.txt','LGPL-2.1')]:
+            put('usr/share/common-licenses/'+target,(ROOT/'LICENSES'/source).read_bytes())
         notices = toolchain/'share/doc/rust'
         for name in ['LICENSE-APACHE', 'LICENSE-MIT', 'COPYRIGHT.html']:
             if (notices/name).is_file():

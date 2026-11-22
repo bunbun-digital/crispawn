@@ -1,0 +1,3 @@
+GNU compiler runtime libraries, GCC 13.3.0.
+Copyright Free Software Foundation, Inc.
+The GNU runtime libraries retain GPL-3.0-or-later with the GCC Runtime Library Exception 3.1 where specified by upstream. See GPL-3.0-only.txt and GCC-exception-3.1.txt. The external compiler itself is a build tool and is not included in the ISO.

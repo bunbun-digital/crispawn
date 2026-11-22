@@ -1,0 +1,27 @@
+[
+  {
+    "name": "musl-COPYRIGHT",
+    "url": "https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v1.2.5",
+    "sha256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af"
+  },
+  {
+    "name": "GPL-2.0-only.txt",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/GPL-2.0-only.txt",
+    "sha256": "aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3"
+  },
+  {
+    "name": "GPL-3.0-only.txt",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/GPL-3.0-only.txt",
+    "sha256": "fb981668c18a279e285fc4d83fba1e836cc84dd4daa73c9697d3cfd2d8aca6e0"
+  },
+  {
+    "name": "LGPL-2.1-only.txt",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/LGPL-2.1-only.txt",
+    "sha256": "5749785c8bdefafcb5d798270ed0a967036fe2ca63dcedade1627565dfef81d2"
+  },
+  {
+    "name": "GCC-exception-3.1.txt",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/GCC-exception-3.1.txt",
+    "sha256": "7103d4f7f7e2f8ce10d282a05e0689637f8d6d9ef7b399d808d1da313e69b960"
+  }
+]
