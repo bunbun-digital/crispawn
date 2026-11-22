@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="examples/perfect-backup/assets/crispawn/logo-hero.png" alt="CRISPAWN" width="860">
+</p>
+
 # CRISPAWN Community
 
 CRISPAWN boots a small Linux environment to copy whole internal disks to a USB
