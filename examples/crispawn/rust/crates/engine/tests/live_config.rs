@@ -426,7 +426,7 @@ fn file_ownership_links_and_external_precedence_are_checked() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let builtin = root.join("builtin.json");
-    let external = root.join("perfect-backup.json");
+    let external = root.join("crispawn-config.json");
     fs::write(&builtin, serde_json::to_vec(&baseline()).unwrap()).unwrap();
     fs::set_permissions(&builtin, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(live::load_config(root, &builtin).unwrap().version, 2);

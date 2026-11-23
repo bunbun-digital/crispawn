@@ -42,6 +42,34 @@ use std::{
 pub const RUNTIME: &str = "/run/crispawn";
 pub const BUILTIN_CONFIG: &str = "/etc/perfect-backup/live.json";
 pub const LOG_CAP: u64 = 16 << 20;
+/// The media-layout v2 filename, relative to the mounted USB boot volume.
+pub const USB_BOOT_ISO: &str = "crispawn.iso";
+
+pub fn verify_usb_boot_iso(boot_root: &Path) -> Result<PathBuf> {
+    let path = boot_root.join(USB_BOOT_ISO);
+    let file = io::open_regular(&path, false).map_err(|error| {
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            Error::new(
+                "BOOT_ISO_NOT_FOUND",
+                format!("boot ISO /{USB_BOOT_ISO} not found at {}", path.display()),
+            )
+        } else {
+            error
+        }
+    })?;
+    let mut magic = [0; 5];
+    io::read_exact_at(&file, &mut magic, 32769, 5)?;
+    require(
+        &magic == b"CD001",
+        "BOOT_VOLUME_MISMATCH",
+        format!(
+            "selected boot volume has no ISO signature at {}",
+            path.display()
+        ),
+    )?;
+    Ok(path)
+}
+
 #[path = "live_session.rs"]
 mod session_runner;
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +175,7 @@ impl Config {
 /// An external boot-volume file overrides the ISO default. An invalid override
 /// fails explicitly; it is never silently replaced by another configuration.
 pub fn load_config(boot_root: &Path, builtin: &Path) -> Result<Settings> {
-    let external = boot_root.join("perfect-backup.json");
+    let external = boot_root.join("crispawn-config.json");
     let path = match fs::symlink_metadata(&external) {
         Ok(_) => external,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => builtin.to_path_buf(),
@@ -444,7 +472,7 @@ pub fn require_secure_boot(s: &SecureBootObservation) -> Result<()> {
 }
 pub fn recovery_log_policy(root: &Path, destination: &Path) -> LogPolicy {
     live_config::read(&root.join("live-config.json"))
-        .or_else(|_| live_config::read(&destination.join("perfect-backup.json")))
+        .or_else(|_| live_config::read(&destination.join("crispawn-config.json")))
         .map(|c| c.log_policy)
         .unwrap_or(LogPolicy::Always)
 }
@@ -1161,14 +1189,11 @@ fn run_inner(
         .unwrap_or_else(|e| e.into_inner())
         .language = config.language;
     if optical.is_none() {
-        let iso_file = io::open_regular(&boot_root.join("perfect-backup.iso"), false)?;
-        let mut iso_magic = [0; 5];
-        io::read_exact_at(&iso_file, &mut iso_magic, 32769, 5)?;
-        require(
-            &iso_magic == b"CD001",
-            "BOOT_VOLUME_MISMATCH",
-            "selected boot volume does not contain the boot ISO",
-        )?;
+        let path = verify_usb_boot_iso(boot_root)?;
+        diag.record(
+            "usb_boot_iso_verified",
+            json!({"path":path,"boot_iso_path":"/crispawn.iso"}),
+        );
     } else {
         require(
             matches!(config.volume, Volume::Uuid { .. }),

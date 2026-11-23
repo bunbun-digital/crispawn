@@ -24,6 +24,26 @@ KERNEL_DISPLAY_ARGS = _boot.KERNEL_DISPLAY_ARGS
 grub_splash = _boot.grub_splash
 
 ROOT = Path(__file__).resolve().parents[1]
+BOOT_ISO_PATH = "/crispawn.iso"
+MEDIA_LAYOUT = {"kind": "crispawn.media_layout", "schema_version": 2,
+                "boot_iso_path": BOOT_ISO_PATH,
+                "data_volume_label": "CRISPAWN", "data_directory": "crispawn"}
+
+
+def require_media_layout(data):
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('duplicate CRISPAWN media layout field: ' + key)
+            value[key] = item
+        return value
+    if not 0 < len(data) <= 4096:
+        raise ValueError('invalid CRISPAWN media layout size')
+    value = json.loads(data, object_pairs_hook=unique)
+    if value != MEDIA_LAYOUT or type(value.get('schema_version')) is not int:
+        raise ValueError('CRISPAWN_MEDIA_LAYOUT_MISMATCH: expected v2 with boot_iso_path=/crispawn.iso')
+    return value
 
 
 def sparse_copy(source, target, offset=0, length=None, source_offset=0):
@@ -71,6 +91,14 @@ def tools():
 def create(iso, config, output, work, size_mib=2048, secure_profile=None):
     iso = iso.resolve(strict=True)
     assert iso.is_file() and 0 < iso.stat().st_size < 100_000_000
+    sdk = ROOT / "build/os/host/bin"
+    spec = importlib.util.spec_from_file_location("iso_check", ROOT / "tools/initramfs.py")
+    iso_check = importlib.util.module_from_spec(spec); spec.loader.exec_module(iso_check)
+    # Reject mismatched media contracts before creating or formatting output.
+    with tempfile.TemporaryDirectory(prefix=".crispawn-media-layout-", dir=output.parent) as temporary:
+        marker = Path(temporary) / 'crispawn-media.json'
+        iso_check.extract(str(sdk / 'xorriso'), iso, '/boot/crispawn-media.json', marker)
+        layout = require_media_layout(marker.read_bytes())
     if config is not None:
         config = config.resolve(strict=True)
         assert config.is_file() and config.stat().st_size <= 65536
@@ -101,7 +129,6 @@ def create(iso, config, output, work, size_mib=2048, secure_profile=None):
         vendor = _boot.efi_vendor(profile)
         assert all(hashlib.sha256((secure_profile / p).read_bytes()).hexdigest() == h for p, h in profile["files"].items())
     host, env = tools()
-    sdk = ROOT / "build/os/host/bin"
     calls = []
 
     def run(argv, input_bytes=None):
@@ -134,12 +161,10 @@ def create(iso, config, output, work, size_mib=2048, secure_profile=None):
     assert sector[3:11] == b"NTFS    "
     volume_uuid = f'{int.from_bytes(sector[72:80], "little"):016X}'
     if not profile:
-        run([host / "usr/sbin/ntfscp", ntfs, iso, "/perfect-backup.iso"])
+        run([host / "usr/sbin/ntfscp", ntfs, iso, BOOT_ISO_PATH])
         if config is not None:
-            run([host / "usr/sbin/ntfscp", ntfs, config, "/perfect-backup.json"])
+            run([host / "usr/sbin/ntfscp", ntfs, config, "/crispawn-config.json"])
     if profile:
-        spec = importlib.util.spec_from_file_location("iso_check", ROOT / "tools/initramfs.py")
-        iso_check = importlib.util.module_from_spec(spec); spec.loader.exec_module(iso_check)
         iso_check.extract(str(sdk / "xorriso"), iso, "/boot/bzImage", work / "iso-kernel")
         assert hashlib.sha256((work / "iso-kernel").read_bytes()).hexdigest() == profile["files"]["kernel"], "ISO kernel does not match signed profile"
     run([sdk / "mformat", "-i", esp, "-F", "::"])
@@ -153,9 +178,9 @@ def create(iso, config, output, work, size_mib=2048, secure_profile=None):
         boot_uuid = f"{serial >> 16:04X}-{serial & 65535:04X}"
     grub = work / "grub.cfg"
     grub.write_text("serial --unit=0 --speed=115200\nterminal_output serial\n"
-                    f"echo PB_USB_GRUB_START uuid={boot_uuid} iso=perfect-backup.iso\n"
+                    f"echo PB_USB_GRUB_START uuid={boot_uuid} iso=crispawn.iso\n"
                     f"search --no-floppy --fs-uuid --set=pbroot {boot_uuid}\n"
-                    "loopback loop ($pbroot)/perfect-backup.iso\n"
+                    "loopback loop ($pbroot)/crispawn.iso\n"
                     + grub_splash("(loop)") +
                     f"linux (loop)/boot/bzImage {KERNEL_DISPLAY_ARGS} net.ifnames=0 rdinit=/init pb.live=1 pb.boot_uuid={boot_uuid}" +
                     (f" pb.data_uuid={volume_uuid} pb.require_secure_boot=1 module.sig_enforce=1" if profile else "") + "\n"
@@ -172,17 +197,26 @@ def create(iso, config, output, work, size_mib=2048, secure_profile=None):
     run([sdk / "mmd", "-i", esp, "::/EFI", "::/EFI/BOOT"])
     run([sdk / "mcopy", "-i", esp, boot, "::/EFI/BOOT/BOOTX64.EFI"])
     if profile:
-        run([sdk / "mcopy", "-i", esp, iso, "::/perfect-backup.iso"])
+        run([sdk / "mcopy", "-i", esp, iso, "::/crispawn.iso"])
         if config is not None:
-            run([sdk / "mcopy", "-i", esp, config, "::/perfect-backup.json"])
+            run([sdk / "mcopy", "-i", esp, config, "::/crispawn-config.json"])
         run([sdk / "mcopy", "-i", esp, secure_profile / "grubx64.efi", "::/EFI/BOOT/grubx64.efi"])
         run([sdk / "mcopy", "-i", esp, secure_profile / "mmx64.efi", "::/EFI/BOOT/mmx64.efi"])
         run([sdk / "mmd", "-i", esp, "::/EFI/" + vendor, "::/boot", "::/boot/grub"])
         for path in ["::/EFI/BOOT/grub.cfg", "::/EFI/" + vendor + "/grub.cfg", "::/boot/grub/grub.cfg"]:
             run([sdk / "mcopy", "-i", esp, grub, path])
+    if profile:
+        readback = work / 'verified-boot-iso'
+        run([sdk / 'mcopy', '-i', esp, '::' + BOOT_ISO_PATH, readback])
+        boot_iso_hash = hashlib.sha256(readback.read_bytes()).hexdigest()
+    else:
+        boot_iso_hash = hashlib.sha256(run([host / 'usr/bin/ntfscat', ntfs, BOOT_ISO_PATH]).stdout).hexdigest()
+    assert boot_iso_hash == hashlib.sha256(iso.read_bytes()).hexdigest(), 'boot ISO media readback mismatch'
     sparse_copy(esp, output, offset=esp_offset)
     sparse_copy(ntfs, output, offset=ntfs_offset)
     result = {"schema_version": 1, "image": str(output), "bytes": total, "uuid": volume_uuid,
+              "boot_iso_path": BOOT_ISO_PATH, "media_layout": layout,
+              "boot_iso_readback_sha256": boot_iso_hash,
               "data_volume_label": "CRISPAWN", "data_directory": "crispawn",
               "configuration_source": "external-boot-file" if config is not None else "embedded-in-iso",
               "esp_offset": esp_offset, "esp_bytes": esp_bytes, "ntfs_offset": ntfs_offset, "ntfs_bytes": ntfs_bytes,

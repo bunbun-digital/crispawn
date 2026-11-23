@@ -49,7 +49,7 @@ def main():
     parser.add_argument('--download-cache', type=Path)
     parser.add_argument('--buildroot-source', type=Path, help='optional clean upstream source cache')
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 1, 8))
-    parser.add_argument('--release-id', default='0.1.0-alpha.2')
+    parser.add_argument('--release-id', default='0.1.0-alpha.3')
     args = parser.parse_args()
     assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", args.release_id), "invalid release ID"
     work = args.work_dir.resolve()

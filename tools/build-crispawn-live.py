@@ -31,7 +31,8 @@ grub_splash = _boot.grub_splash
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "examples/crispawn/rust"
 
-MEDIA_LAYOUT = {"kind": "crispawn.media_layout", "schema_version": 1,
+MEDIA_LAYOUT = {"kind": "crispawn.media_layout", "schema_version": 2,
+                "boot_iso_path": "/crispawn.iso",
                 "data_volume_label": "CRISPAWN", "data_directory": "crispawn"}
 
 
@@ -45,7 +46,7 @@ def main():
     parser.add_argument("--rootfs", type=Path, required=True)
     parser.add_argument("--toolchain", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
-    parser.add_argument("--release-id", default="0.1.0-alpha.2")
+    parser.add_argument("--release-id", default="0.1.0-alpha.3")
     parser.add_argument("--kernel", type=Path, help="legacy custom kernel, requires --unsigned-kernel")
     
     parser.add_argument("--target-dir", type=Path, default=Path("/tmp/.orchestrator-crispawn-live-target"))

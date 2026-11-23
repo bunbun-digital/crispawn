@@ -77,7 +77,7 @@ def main():
         esp=work/'override-esp.img'
         with esp.open('xb') as stream:stream.truncate(media['esp_bytes'])
         usb.sparse_copy(work/'usb.img',esp,length=media['esp_bytes'],source_offset=media['esp_offset'])
-        subprocess.run([ROOT/'build/os/host/bin/mcopy','-o','-i',esp,override,'::/perfect-backup.json'],check=True)
+        subprocess.run([ROOT/'build/os/host/bin/mcopy','-o','-i',esp,override,'::/crispawn-config.json'],check=True)
         with esp.open('rb') as src,(work/'usb.img').open('r+b') as dst:
             dst.seek(media['esp_offset']);shutil.copyfileobj(src,dst);dst.flush();os.fsync(dst.fileno())
     def ntfs(work, media):

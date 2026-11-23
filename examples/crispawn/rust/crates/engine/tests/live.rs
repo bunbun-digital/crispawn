@@ -13,6 +13,50 @@ use std::{
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
 };
+
+#[test]
+fn usb_boot_iso_requires_the_contract_filename_and_reports_the_missing_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let expected = directory.path().join("crispawn.iso");
+    let missing = live::verify_usb_boot_iso(directory.path()).unwrap_err();
+    assert_eq!(missing.code, "BOOT_ISO_NOT_FOUND");
+    assert!(missing.detail.contains(&expected.display().to_string()));
+    let renamed = directory.path().join("crispawn-0123456789abcdef.iso");
+    let mut bytes = vec![0; 32774];
+    bytes[32769..].copy_from_slice(b"CD001");
+    fs::write(&renamed, &bytes).unwrap();
+    assert_eq!(
+        live::verify_usb_boot_iso(directory.path())
+            .unwrap_err()
+            .code,
+        "BOOT_ISO_NOT_FOUND"
+    );
+    fs::rename(&renamed, &expected).unwrap();
+    assert_eq!(
+        live::verify_usb_boot_iso(directory.path()).unwrap(),
+        expected
+    );
+    assert_eq!(fs::read(&expected).unwrap(), bytes);
+}
+
+#[test]
+fn usb_boot_iso_rejects_symlinks_and_invalid_iso_signatures() {
+    let directory = tempfile::tempdir().unwrap();
+    let expected = directory.path().join("crispawn.iso");
+    let target = directory.path().join("target");
+    fs::write(&target, vec![0; 32774]).unwrap();
+    symlink(&target, &expected).unwrap();
+    assert!(live::verify_usb_boot_iso(directory.path()).is_err());
+    fs::remove_file(&expected).unwrap();
+    fs::rename(&target, &expected).unwrap();
+    assert_eq!(
+        live::verify_usb_boot_iso(directory.path())
+            .unwrap_err()
+            .code,
+        "BOOT_VOLUME_MISMATCH"
+    );
+}
+
 fn disk(name: &str, usb: bool, partition: bool, whole: &str) -> Device {
     Device {
         name: name.into(),
@@ -383,22 +427,22 @@ fn embedded_settings_are_used_unless_an_explicit_external_file_exists() {
     memory_only.log_policy = live::LogPolicy::Never;
     memory_only.log_sync_interval_ms = 1000;
     fs::write(
-        boot.join("perfect-backup.json"),
+        boot.join("crispawn-config.json"),
         serde_json::to_vec(&memory_only).unwrap(),
     )
     .unwrap();
     fs::set_permissions(
-        boot.join("perfect-backup.json"),
+        boot.join("crispawn-config.json"),
         fs::Permissions::from_mode(0o600),
     )
     .unwrap();
     let c = live::load_config(&boot, &builtin).unwrap();
     assert_eq!(c.log_policy, live::LogPolicy::Never);
     assert_eq!(c.log_sync_interval_ms, 1000);
-    fs::write(boot.join("perfect-backup.json"), b"invalid override").unwrap();
+    fs::write(boot.join("crispawn-config.json"), b"invalid override").unwrap();
     assert!(live::load_config(&boot, &builtin).is_err());
-    fs::remove_file(boot.join("perfect-backup.json")).unwrap();
-    symlink(&builtin, boot.join("perfect-backup.json")).unwrap();
+    fs::remove_file(boot.join("crispawn-config.json")).unwrap();
+    symlink(&builtin, boot.join("crispawn-config.json")).unwrap();
     assert!(live::load_config(&boot, &builtin).is_err());
     memory_only.log_sync_interval_ms = 60001;
     assert!(memory_only.validate().is_err());
@@ -642,7 +686,7 @@ fn split_boot_configuration_preserves_error_log_policy_in_ram() {
     .unwrap();
     assert_eq!(live::recovery_log_policy(&root, &data), LogPolicy::Never);
     fs::write(
-        data.join("perfect-backup.json"),
+        data.join("crispawn-config.json"),
         serde_json::to_vec(&Config::default()).unwrap(),
     )
     .unwrap();

@@ -22,7 +22,8 @@ from crispawn_qemu import run_guest
 from crispawn_log_evidence import verify_log_directory
 
 ROOT = Path(__file__).resolve().parents[1]
-LAYOUT = {"kind": "crispawn.media_layout", "schema_version": 1,
+LAYOUT = {"kind": "crispawn.media_layout", "schema_version": 2,
+          "boot_iso_path": "/crispawn.iso",
           "data_volume_label": "CRISPAWN", "data_directory": "crispawn"}
 
 
@@ -101,20 +102,28 @@ def main():
         (folder / 'ntfs-layout.json').write_text(json.dumps(layout, indent=2) + '\n')
         return file, cat, listing, layout
 
-    def guest(image, source, folder, restore=False):
+    def guest(image, source, folder, restore=False, secure=True, expected_failure=None):
         folder.mkdir()
         sockets = Path(tempfile.mkdtemp(prefix='.crispawn-media-qemu-'))
         probes = run_guest(sockets, folder, image, source, timeout=600, readonly=not restore,
-                           secure_boot=True, cpus=8, memory_mib=8192, capture_gui=True,
+                           secure_boot=secure, cpus=8, memory_mib=8192, capture_gui=True,
+                           expected_failure_code=expected_failure,
                            source_read_bps=32 << 20,
                            ui_scenario='restore' if restore else None,
                            source_serial='PB-RESTORE-0001' if restore else 'PB-SOURCE-0001')
         observations = [p['secure_boot'] for p in probes if p.get('secure_boot')]
-        assert observations and all(s['enabled'] and not s['setup_mode'] and not s['shim_validation_disabled']
-                                    and ('[integrity]' in s['lockdown'] or '[confidentiality]' in s['lockdown'])
-                                    for s in observations)
-        assert any(p.get('finalization_complete') for p in probes)
-        assert any(p['phase'] == ('RESTORING' if restore else 'COPYING') for p in probes)
+        assert observations
+        if secure:
+            assert all(s['enabled'] and not s['setup_mode'] and not s['shim_validation_disabled']
+                       and ('[integrity]' in s['lockdown'] or '[confidentiality]' in s['lockdown']) for s in observations)
+        else:
+            assert all(s['enabled'] is False for s in observations)
+        assert not any('IO_ERROR' in p.get('detail', '') for p in probes)
+        if expected_failure:
+            assert not any(p['phase'] in ('COPYING', 'RESTORING') for p in probes)
+        else:
+            assert any(p.get('finalization_complete') for p in probes)
+            assert any(p['phase'] == ('RESTORING' if restore else 'COPYING') for p in probes)
         return probes
 
     save()
@@ -135,7 +144,7 @@ def main():
             command([sdk / 'mcopy', '-i', fat, '::/EFI/BOOT/' + path, extracted])
             assert digest(extracted) == profile['files'][name]
             state['signed_boot_files'][name] = digest(extracted)
-        check('iso-under-100MB-four-field-media-layout-and-pinned-signed-kernel-efi-readback')
+        check('iso-under-100MB-five-field-v2-media-layout-and-pinned-signed-kernel-efi-readback')
 
         source = output / 'source.img'
         with source.open('xb') as stream:
@@ -149,6 +158,8 @@ def main():
         image = output / 'backup-usb.img'
         # No external override: this boots and copies with the new ISO defaults.
         media = usb.create(args.iso, None, image, output / 'media', 2048, profile_path)
+        assert media['boot_iso_path'] == '/crispawn.iso' and media['media_layout'] == LAYOUT
+        assert media['boot_iso_readback_sha256'] == state['iso_sha256']
         state['media'] = media
         state['phase'] = 'copying'
         save()
@@ -188,17 +199,88 @@ def main():
         (copied / 'job-report.json').write_text(json.dumps(report, indent=2) + '\n')
         logs = listing('/crispawn/logs')
         assert logs
+        copy_records = []
         for directory in logs:
             assert re.fullmatch(r'[0-9a-f]{32}-(?:complete|live)-[0-9a-f]{8}', directory)
             folder = copied / 'logs' / directory
             folder.mkdir(parents=True)
             for name in listing('/crispawn/logs/' + directory):
                 assert re.fullmatch(r'(events-[0-9]+\.jsonl|log-info\.json|probe-final\.json)', name)
-                (folder / name).write_bytes(cat('/crispawn/logs/' + directory + '/' + name))
+                data = cat('/crispawn/logs/' + directory + '/' + name)
+                (folder / name).write_bytes(data)
+                if name.startswith('events-'):
+                    copy_records.extend(json.loads(line) for line in data.splitlines())
             verify_log_directory(folder)
+        assert any(r.get('kind') == 'usb_boot_iso_verified'
+                   and r['value']['boot_iso_path'] == '/crispawn.iso'
+                   and r['value']['path'].endswith('/crispawn.iso') for r in copy_records)
+        assert not any(r.get('kind') == 'optical_boot' for r in copy_records)
         assert digest(source) == source_hash
         state['copy_layout'] = layout
         check('embedded-defaults-usb-copy-inline-verification-continuous-logs-sessions-reports-and-clean-work')
+
+        # Also exercise the ordinary unsigned virtual-media path, with its ISO
+        # on NTFS. The published ISO's vendor-signed files remain unchanged.
+        unsigned = output / 'unsigned-copy'
+        unsigned.mkdir()
+        runtime = json.loads((ROOT / 'config/crispawn/examples/live-v2-usb.json').read_text())
+        runtime['startup']['delay_seconds'] = 0
+        runtime['completion']['delay_seconds'] = 1
+        override = unsigned / 'settings.json'
+        override.write_text(json.dumps(runtime) + '\n')
+        unsigned_image = unsigned / 'usb.img'
+        unsigned_media = usb.create(args.iso, override, unsigned_image, unsigned / 'media', 2048, None)
+        assert unsigned_media['boot_iso_path'] == '/crispawn.iso'
+        assert unsigned_media['media_layout'] == LAYOUT
+        assert unsigned_media['boot_iso_readback_sha256'] == state['iso_sha256']
+        unsigned_probes = guest(unsigned_image, source, unsigned / 'guest', secure=False)
+        assert any(p.get('snapshot') and int(p['snapshot']['verified_raw_bytes']) == source.stat().st_size
+                   for p in unsigned_probes)
+        _, unsigned_cat, unsigned_listing, unsigned_layout = ntfs(unsigned_image, unsigned_media, unsigned)
+        assert 'crispawn.iso' in unsigned_listing('/')
+        unsigned_session = json.loads(unsigned_cat('/crispawn/sessions/' + unsigned_listing('/crispawn/sessions')[0]))
+        unsigned_prefix = '/' + unsigned_session['disks'][0]['archive'] + '/'
+        assert unsigned_prefix.startswith('/crispawn/backups/')
+        unsigned_archive = unsigned / 'archive'
+        unsigned_archive.mkdir(); (unsigned_archive / 'data').mkdir()
+        for name in ['metadata.json', 'plan.json', 'files.csv', 'checksums.sha256', 'COMMITTED', 'journal.jsonl', '.lock']:
+            (unsigned_archive / name).write_bytes(unsigned_cat(unsigned_prefix + name))
+        for row in csv.DictReader((unsigned_archive / 'files.csv').open(newline='')):
+            name = row['relative_path']; assert re.fullmatch(r'data/data-[0-9]{6}\.pbk', name)
+            (unsigned_archive / name).write_bytes(unsigned_cat(unsigned_prefix + name))
+        verified = subprocess.run(['python3', ROOT / 'tools/check-crispawn-format.py', unsigned_archive, '--source-file', source],
+                                  env=verify_env, capture_output=True, timeout=120)
+        (unsigned / 'independent-verification.log').write_bytes(verified.stdout + verified.stderr)
+        assert verified.returncode == 0, verified.stderr.decode(errors='replace')
+        state['unsigned_layout'] = unsigned_layout
+        check('unsigned-ntfs-crispawn-iso-boot-copy-independent-verification-and-normal-shutdown')
+
+        # Reproduce the reported Builder mismatch: GRUB loads a renamed ISO,
+        # while LiveOS must reject the missing formal filename before writes.
+        fault = output / 'missing-boot-iso'; fault.mkdir()
+        failure_runtime = json.loads(json.dumps(runtime))
+        failure_runtime['completion']['delay_seconds'] = 3
+        failure_config = fault / 'settings.json'
+        failure_config.write_text(json.dumps(failure_runtime) + '\n')
+        failure_image = fault / 'usb.img'
+        failure_media = usb.create(args.iso, failure_config, failure_image, fault / 'media', 2048, profile_path)
+        failure_esp = partition(failure_image, failure_media, 'esp', fault)
+        renamed_iso = 'crispawn-0123456789abcdef.iso'
+        command([sdk / 'mren', '-i', failure_esp, '::/crispawn.iso', '::/' + renamed_iso])
+        failure_grub = fault / 'grub.cfg'
+        failure_grub.write_text((fault / 'media/grub.cfg').read_text().replace('crispawn.iso', renamed_iso))
+        for name in ['::/EFI/BOOT/grub.cfg', '::/EFI/' + usb._boot.efi_vendor(profile) + '/grub.cfg', '::/boot/grub/grub.cfg']:
+            command([sdk / 'mcopy', '-o', '-i', failure_esp, failure_grub, name])
+        with failure_esp.open('rb') as src, failure_image.open('r+b') as dst:
+            dst.seek(failure_media['esp_offset']); shutil.copyfileobj(src, dst); dst.flush(); os.fsync(dst.fileno())
+        failure_hash = digest(failure_image)
+        failed = guest(failure_image, source, fault / 'guest', expected_failure='BOOT_ISO_NOT_FOUND')
+        failures = json.loads((fault / 'guest/failures.json').read_text())
+        assert any(f.get('code') == 'BOOT_ISO_NOT_FOUND' and '/crispawn.iso' in json.dumps(f) for f in failures)
+        assert any(p['phase'] == 'FAILED' and '/crispawn.iso' in p['detail'] for p in failed)
+        assert digest(failure_image) == failure_hash
+        assert digest(source) == source_hash
+        check('renamed-iso-mismatch-reports-boot-iso-not-found-and-path-without-backup-writes')
 
         # Emulate the post-move state produced by Builder: only the saved JSON
         # retains its old archive prefix. The original completed USB stays intact.
@@ -230,7 +312,7 @@ def main():
         runtime['completion']['delay_seconds'] = 1
         override = output / 'restore-config.json'
         override.write_text(json.dumps(runtime) + '\n')
-        command([sdk / 'mcopy', '-o', '-i', esp, override, '::/perfect-backup.json'])
+        command([sdk / 'mcopy', '-o', '-i', esp, override, '::/crispawn-config.json'])
         with esp.open('rb') as src, migrated.open('r+b') as dst:
             dst.seek(media['esp_offset'])
             shutil.copyfileobj(src, dst)

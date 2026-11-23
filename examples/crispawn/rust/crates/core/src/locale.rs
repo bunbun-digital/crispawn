@@ -87,6 +87,7 @@ pub enum Text {
     ErrorLowSpace,
     ErrorFull,
     ErrorIo,
+    ErrorBootIso,
     ErrorDevice,
     ErrorReadOnly,
     ErrorSource,
@@ -236,6 +237,7 @@ impl Language {
             Text::ErrorLowSpace => ("保存先の空き容量が1GBを下回ったため、中止しました。", "Stopped because the destination has less than 1 GB of free space."),
             Text::ErrorFull => ("保存先の空き容量が不足しています。処理を中止しました。", "The destination is full. The operation was stopped."),
             Text::ErrorIo => ("ディスクの読み書きに失敗したため、中止しました。", "A disk read or write failed. The operation was stopped."),
+            Text::ErrorBootIso => ("起動用ISO「/crispawn.iso」が見つかりません。起動用USBを作り直してください。", "The boot ISO /crispawn.iso was not found. Recreate the boot USB."),
             Text::ErrorDevice => ("必要なディスクが見つからないか、接続が切れました。", "A required disk is missing or was disconnected."),
             Text::ErrorReadOnly => ("保存先に書き込めません。書き込み保護を確認してください。", "The destination is read-only. Check its write protection."),
             Text::ErrorSource => ("対象ディスクの状態が変わったため、安全のため中止しました。", "The source disk changed. The operation was stopped for safety."),
@@ -258,6 +260,7 @@ impl Language {
             "DESTINATION_LOW_SPACE" => Text::ErrorLowSpace,
             "DESTINATION_FULL" | "INSUFFICIENT_SPACE" => Text::ErrorFull,
             "IO_ERROR" | "DIAGNOSTIC_LOG_FAILED" | "NTFS_SYNC_FAILED" => Text::ErrorIo,
+            "BOOT_ISO_NOT_FOUND" => Text::ErrorBootIso,
             "DEVICE_UNAVAILABLE"
             | "SOURCE_NOT_FOUND"
             | "BOOT_VOLUME_NOT_FOUND"
@@ -334,6 +337,19 @@ mod tests {
         assert!(!Language::Ja
             .error_detail("UNKNOWN: secret detail")
             .contains("secret"));
+    }
+    #[test]
+    fn missing_boot_iso_is_named_in_both_languages() {
+        for language in [Language::Ja, Language::En] {
+            let message = language
+                .error_detail("BOOT_ISO_NOT_FOUND: mounted path /run/crispawn/boot/crispawn.iso");
+            assert!(message.contains("/crispawn.iso"));
+            assert!(message.contains("BOOT_ISO_NOT_FOUND"));
+            assert!(!message.contains("mounted path"));
+        }
+        assert!(Language::Ja
+            .error_detail("BOOT_ISO_NOT_FOUND: detail")
+            .contains("見つかりません"));
     }
     #[test]
     fn messages_preserve_values_and_do_not_expand_device_text() {

@@ -60,6 +60,13 @@ def main():
         assert result.returncode == 0, result.stderr.decode(errors='replace')
         return result.stdout
     try:
+        marker = output / 'crispawn-media.json'
+        settings.iso.extract(xorriso, args.iso, '/boot/crispawn-media.json', marker)
+        state['media_layout'] = json.loads(marker.read_text())
+        assert state['media_layout'] == {
+            'kind': 'crispawn.media_layout', 'schema_version': 2,
+            'boot_iso_path': '/crispawn.iso', 'data_volume_label': 'CRISPAWN',
+            'data_directory': 'crispawn'}
         state['platforms'] = settings.iso.boot_platforms(xorriso, args.iso)
         assert set(state['platforms']) == {'BIOS', 'UEFI'}
         # This USB disk deliberately has no ESP and no boot loader: an optical
@@ -174,6 +181,10 @@ def main():
                     verify_log_directory(saved)
                 if case != 'usb':
                     assert any(r.get('kind') == 'optical_boot' for r in records)
+                    assert not any(r.get('kind') == 'usb_boot_iso_verified' for r in records)
+                else:
+                    assert any(r.get('kind') == 'usb_boot_iso_verified'
+                               and r['value']['boot_iso_path'] == '/crispawn.iso' for r in records)
                 if case == 'restore':
                     assert digest(source) == source_hash
                     assert any(p['phase'] == 'RESTORING' for p in probes)

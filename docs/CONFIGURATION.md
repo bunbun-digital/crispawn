@@ -16,12 +16,14 @@ Schemas describe shared wire types; schema validity alone never enables a backen
 - `logging.policy`: `always`, `on_error`, or `never`. Logs use the backup destination.
 
 Use `tools/configure-crispawn.py` to create a new configured ISO. Never edit an
-existing image in place. On USB, an external `/perfect-backup.json` overrides
+existing image in place. On USB, an external `/crispawn-config.json` overrides
 the embedded `/etc/perfect-backup/live.json` as a whole; malformed overrides
 are rejected, not silently ignored. Internal legacy paths remain for Builder compatibility.
 
 The ISO carries both `/usr/share/crispawn/runtime-capabilities.json` and the
 Builder-facing `/etc/perfect-backup/release-capabilities.json`. Both list the
 actual compiled implementation. The ISO also contains `/boot/crispawn-media.json`
-with label `CRISPAWN` and top-level directory `crispawn`.
+with media-layout schema 2, `boot_iso_path` `/crispawn.iso`, label `CRISPAWN`
+and top-level directory `crispawn`. The ISO belongs at the ESP root under that
+exact filename; see [the complete media contract](COMPATIBILITY.md#usb-media-layout-v2).
 
