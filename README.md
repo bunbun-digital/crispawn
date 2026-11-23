@@ -125,6 +125,27 @@ follow the selected language; failure logs are retained when storage remains
 usable. `failure.action` selects an error display that stays on screen or a
 delayed poweroff.
 
+## Compression
+
+CRISPAWN supports **zstd (Zstandard), gzip and xz**. The standard `balanced`
+profile starts with zstd level 3, then automatically adjusts the method and
+level based on compression results and processing speed. Current automatic
+selection candidates are:
+
+| Method | Compression levels considered |
+| --- | --- |
+| zstd | 1, 3, 6, 9 |
+| gzip | 1, 6, 9 |
+| xz | 0, 3 |
+
+Data whose compressed size would equal or exceed its original size is stored
+uncompressed (`raw`). All-zero data is stored as a compact record (`zero`) and
+restored to the original number of zero bytes.
+
+These methods are used within the CRISPAWN archive format. A backup may contain
+multiple methods; the method and level are recorded with the saved data and
+used automatically during restore.
+
 ## Saved data
 
 The standard NTFS layout is:
