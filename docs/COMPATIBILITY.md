@@ -14,7 +14,7 @@ and the shared UI library use CRISPAWN names:
 
 ISO-internal configuration and stored-data paths retain their existing spelling. They are
 integration identifiers, not product names. Boot media uses the separate v2
-contract below; old ISO filenames are not supported.
+file layout below; old ISO filenames are not supported.
 
 | Identifier | Purpose |
 | --- | --- |
@@ -35,7 +35,8 @@ The ISO contains `/boot/crispawn-media.json` with exactly these five fields:
 {"kind":"crispawn.media_layout","schema_version":2,"boot_iso_path":"/crispawn.iso","data_volume_label":"CRISPAWN","data_directory":"crispawn"}
 ```
 
-Builder must match the complete contract before writing USB media. The signed
+Builder must require an exact match with the five-field JSON object above
+before writing USB media. The signed
 USB route places the ISO at the ESP root as `/crispawn.iso`; the ordinary
 unsigned virtual-media route uses the same filename on NTFS. GRUB and LiveOS
 both use that exact path. Hash-suffixed filenames are not aliases. A missing

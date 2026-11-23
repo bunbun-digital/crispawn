@@ -1,4 +1,4 @@
-# CRISPAWN configuration contract
+# CRISPAWN configuration format
 
 Original schemas, fixtures and validation code are Apache-2.0. See [runtime settings](../../docs/CONFIGURATION.md).
 

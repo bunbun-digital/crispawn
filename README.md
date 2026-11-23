@@ -41,7 +41,7 @@ compressible demo data. This demo uses a five-second countdown; the default is 3
 | Network | Offline; no Wi-Fi/network drivers or SMB/S3 destination support in the official Community image |
 
 Optical boot uses the read-only ISO directly and requires an explicitly
-configured USB destination UUID. USB boot uses the media contract below.
+configured USB destination UUID. The USB file layout is described below.
 Secure Boot support preserves the upstream signed files; tested platforms and
 limitations are recorded per release.
 
@@ -50,15 +50,15 @@ limitations are recorded per release.
 Builder configures the ISO before boot. Runtime settings are a JSON document
 with `kind: "crispawn.live"` and `schema_version: 2`.
 The [complete USB example](config/crispawn/examples/live-v2-usb.json) and
-[JSON Schema](config/crispawn/schemas/live-v2.schema.json) define the contract;
+[JSON Schema](config/crispawn/schemas/live-v2.schema.json) define the settings format;
 the values below describe the standard profile, not permission to omit required fields.
 
 On USB, `/crispawn-config.json` at the boot-volume root replaces the embedded
 settings **as a complete document**. It is not a partial merge. If absent,
 the embedded settings apply. Malformed settings, unknown fields and unsupported
 features stop processing rather than silently selecting another destination.
-The exact embedded-settings and capability-file interfaces are listed in
-[integration compatibility](docs/COMPATIBILITY.md#builder-and-stored-data-interfaces).
+See [ISO files used by Builder](docs/COMPATIBILITY.md#builder-and-stored-data-interfaces)
+for the locations of embedded settings and supported-feature information.
 
 | Setting | External behavior / standard profile |
 | --- | --- |
@@ -74,12 +74,13 @@ The exact embedded-settings and capability-file interfaces are listed in
 
 Console automatic copy requires a zero start delay. Headless mode requires
 `auto_copy` with a zero delay; interactive restore selection is unavailable there.
-See [runtime settings](docs/CONFIGURATION.md) for the full configuration contract.
+See [runtime settings](docs/CONFIGURATION.md) for the full settings specification.
 
-### Builder media contract
+### Boot media layout
 
-Every ISO contains `/boot/crispawn-media.json`. Builder checks this complete
-five-field object before writing USB media:
+Every ISO contains `/boot/crispawn-media.json`, which specifies the boot ISO
+path, data-volume label and storage directory. Before writing USB media,
+Builder checks that this JSON object exactly matches the five-field example below:
 
 ```json
 {"kind":"crispawn.media_layout","schema_version":2,"boot_iso_path":"/crispawn.iso","data_volume_label":"CRISPAWN","data_directory":"crispawn"}
@@ -89,7 +90,7 @@ The signed USB layout places `/crispawn.iso` and optional
 `/crispawn-config.json` at the FAT32 EFI System Partition root, with backup data
 on the NTFS volume labeled `CRISPAWN`. Hash-suffixed ISO filenames are not aliases.
 A missing boot ISO stops before copying and reports `BOOT_ISO_NOT_FOUND` with
-the expected path. See [the media contract](docs/COMPATIBILITY.md#usb-media-layout-v2).
+the expected path. See [the USB file layout specification](docs/COMPATIBILITY.md#usb-media-layout-v2).
 
 ## Copy and restore behavior
 

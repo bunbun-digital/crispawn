@@ -1,6 +1,6 @@
 # Runtime settings
 
-The canonical contract is `config/crispawn/schemas/live-v2.schema.json`.
+Runtime settings are defined by `config/crispawn/schemas/live-v2.schema.json`.
 Start from `config/crispawn/examples/live-v2-usb.json`.
 The community edition requires USB/NTFS and `network.mode=none`.
 Schemas describe shared wire types; schema validity alone never enables a backend.
@@ -25,5 +25,5 @@ Builder-facing `/etc/perfect-backup/release-capabilities.json`. Both list the
 actual compiled implementation. The ISO also contains `/boot/crispawn-media.json`
 with media-layout schema 2, `boot_iso_path` `/crispawn.iso`, label `CRISPAWN`
 and top-level directory `crispawn`. The ISO belongs at the ESP root under that
-exact filename; see [the complete media contract](COMPATIBILITY.md#usb-media-layout-v2).
+exact filename; see [the USB file layout specification](COMPATIBILITY.md#usb-media-layout-v2).
 
