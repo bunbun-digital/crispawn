@@ -36,6 +36,7 @@ export CARGO_HOME="$PWD/build/cargo-home"
 cargo test --locked --manifest-path examples/crispawn/rust/Cargo.toml
 cargo fmt --all --check --manifest-path examples/crispawn/rust/Cargo.toml
 python3 test/config/crispawn-config-contract.test.py
+python3 test/config/crispawn-startup.test.py
 ```
 
 A functional guest test also needs QEMU, OVMF, ntfs-3g and mtools. Tests create
@@ -43,9 +44,17 @@ new ordinary disk image files and do not format physical devices.
 
 ```sh
 python3 tools/test-crispawn-media-qemu.py --iso /path/to/the/generated.iso --work .orchestrator-test/unique-run
+python3 tools/test-crispawn-console-qemu.py --iso /path/to/the/generated.iso --work .orchestrator-test/unique-console-run
 ```
 
 The ISO uses signed Debian kernel/shim/GRUB with Buildroot userspace. The
 ISO build report records exact inputs and readback hashes. A successful build
 is separate from actual Secure Boot, copy and restore acceptance.
+
+Serial ports are optional. The console regression boots a synthetic 1 GiB
+source with Secure Boot enabled, both with `-serial none` and with a UART.
+It checks the actual QEMU device tree, captures GUI frames, and independently
+reads the committed archive, BLAKE3 verification results and logs from NTFS.
+Guest poweroff alone does not pass this test. Without a UART, live probes
+are unavailable; the persistent NTFS evidence remains authoritative.
 

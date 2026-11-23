@@ -920,6 +920,16 @@ fn handle(
     }
     Ok(None)
 }
+// A diagnostic UART can disappear or reject writes. In release builds a
+// println! panic would abort the entire worker, so this stream is fallible.
+fn diagnostic_output(receiver: mpsc::Receiver<String>, mut output: impl std::io::Write) {
+    for line in receiver {
+        if writeln!(output, "{line}").is_err() {
+            break;
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
     guard()?;
     let root = Path::new(RUNTIME);
@@ -930,9 +940,7 @@ pub fn run() -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let (serial_tx, serial_rx) = mpsc::sync_channel::<String>(16);
     std::thread::spawn(move || {
-        for line in serial_rx {
-            println!("{line}");
-        }
+        diagnostic_output(serial_rx, std::io::stdout().lock());
     });
     let monitor = {
         let diag = diag.clone();
@@ -1093,6 +1101,40 @@ pub fn run() -> Result<()> {
     let _ = monitor.join();
     diag.stop();
     result
+}
+
+#[cfg(test)]
+mod serial_diagnostic_tests {
+    use super::diagnostic_output;
+    use std::{io, sync::mpsc};
+
+    #[test]
+    fn unavailable_diagnostic_output_does_not_panic() {
+        struct FailedUart;
+        impl io::Write for FailedUart {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from_raw_os_error(libc::EIO))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        tx.send("PB_PROBE diagnostic only".into()).unwrap();
+        drop(tx);
+        diagnostic_output(rx, FailedUart);
+    }
+
+    #[test]
+    fn available_diagnostic_output_retains_complete_lines() {
+        let (tx, rx) = mpsc::channel();
+        tx.send("PB_PROBE first".into()).unwrap();
+        tx.send("PB_PROBE second".into()).unwrap();
+        drop(tx);
+        let mut output = Vec::new();
+        diagnostic_output(rx, &mut output);
+        assert_eq!(output, b"PB_PROBE first\nPB_PROBE second\n");
+    }
 }
 fn run_inner(
     root: &Path,
