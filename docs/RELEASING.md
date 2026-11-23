@@ -1,5 +1,8 @@
 # Community releases
 
+The proposed GitHub Actions pipeline and remaining automation work are recorded
+in [Automated ISO builds](AUTOMATED-ISO-BUILDS.md).
+
 Publish ISO files as GitHub Release assets, never as Git objects. The public
 repository contains only Community sources and no original private history.
 Use a prerelease for initial hardware evaluation.
