@@ -18,8 +18,7 @@ Third-party components keep their own licenses; the ISO is a mixed-license distr
 
 ![CRISPAWN copying a disk with the English UI](https://github.com/bunbun-digital/crispawn/releases/download/v0.1.0-alpha.3/crispawn-demo-en.gif)
 
-[Full video](https://github.com/bunbun-digital/crispawn/releases/download/v0.1.0-alpha.3/crispawn-demo-en.mp4)
-· [日本語デモ](README.ja.md)
+[日本語デモ](README.ja.md)
 
 A six-second time-lapse of a real QEMU run, from the first application screen
 after the splash to normal shutdown. The synthetic disk is 10 GB with 1 GB of

@@ -15,8 +15,7 @@ Linuxなどの第三者部品はそれぞれのライセンスを維持します
 
 ![CRISPAWNの日本語UIによるディスクコピー](https://github.com/bunbun-digital/crispawn/releases/download/v0.1.0-alpha.3/crispawn-demo-ja.gif)
 
-[通常速度の動画](https://github.com/bunbun-digital/crispawn/releases/download/v0.1.0-alpha.3/crispawn-demo-ja.mp4)
-· [English demo](README.md#demo)
+[English demo](README.md#demo)
 
 実際のQEMU上の動作を6秒に早送りした映像です。スプラッシュ後の操作画面から正常な電源OFFまでを収録しています。
 10GBの合成ディスクに、圧縮しやすいダミーデータを1GB入れています。デモの開始待ちは5秒です（既定は30秒）。
