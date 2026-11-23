@@ -117,7 +117,9 @@ def main():
             assert all(s['enabled'] and not s['setup_mode'] and not s['shim_validation_disabled']
                        and ('[integrity]' in s['lockdown'] or '[confidentiality]' in s['lockdown']) for s in observations)
         else:
-            assert all(s['enabled'] is False for s in observations)
+            # The ordinary USB firmware has no Secure Boot variable store.
+            assert all(s['enabled'] in (False, None) and '[none]' in s['lockdown']
+                       for s in observations)
         assert not any('IO_ERROR' in p.get('detail', '') for p in probes)
         if expected_failure:
             assert not any(p['phase'] in ('COPYING', 'RESTORING') for p in probes)
