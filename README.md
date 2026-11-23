@@ -14,6 +14,17 @@ The original software is [Apache-2.0](LICENSE). The CRISPAWN name, logos and
 branded artwork are [All rights reserved](examples/crispawn/assets/crispawn/LICENSE).
 Third-party components keep their own licenses; the ISO is a mixed-license distribution.
 
+## Demo
+
+![CRISPAWN copying a disk with the English UI](https://github.com/bunbun-digital/crispawn/releases/download/v0.1.0-alpha.3/crispawn-demo-en.gif)
+
+[Full video](https://github.com/bunbun-digital/crispawn/releases/download/v0.1.0-alpha.3/crispawn-demo-en.mp4)
+· [日本語デモ](README.ja.md)
+
+A six-second time-lapse of a real QEMU run, from the first application screen
+after the splash to normal shutdown. The synthetic disk is 10 GB with 1 GB of
+compressible demo data. This demo uses a five-second countdown; the default is 30 seconds.
+
 ## Use
 
 A bootable USB has a FAT32 EFI System Partition and an NTFS data partition

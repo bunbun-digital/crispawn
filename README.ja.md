@@ -11,6 +11,18 @@ ISOとSHA-256は[Releases](https://github.com/bunbun-digital/crispawn/releases)�
 コードは[Apache-2.0](LICENSE)、名称・ロゴ・ブランド画像は[All rights reserved](examples/crispawn/assets/crispawn/LICENSE)です。
 Linuxなどの第三者部品はそれぞれのライセンスを維持します。
 
+## 動作デモ
+
+![CRISPAWNの日本語UIによるディスクコピー](https://github.com/bunbun-digital/crispawn/releases/download/v0.1.0-alpha.3/crispawn-demo-ja.gif)
+
+[通常速度の動画](https://github.com/bunbun-digital/crispawn/releases/download/v0.1.0-alpha.3/crispawn-demo-ja.mp4)
+· [English demo](README.md#demo)
+
+実際のQEMU上の動作を6秒に早送りした映像です。スプラッシュ後の操作画面から正常な電源OFFまでを収録しています。
+10GBの合成ディスクに、圧縮しやすいダミーデータを1GB入れています。デモの開始待ちは5秒です（既定は30秒）。
+
+## 使い方
+
 起動用USBはFAT32のEFI領域と、ラベルが`CRISPAWN`のNTFS領域を用意します。
 独立した[CRISPAWN Builder](https://github.com/bunbun-digital/crispawn-builder)でISOと設定を書き込めます。
 ISOにはBIOSと署名済みUEFIの光学起動用エントリーも含みます。DVD起動時の保存先USBは別途明示設定が必要です。
