@@ -15,7 +15,7 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
               exercise_shortcuts=False, cpus=2, memory_mib=1536, expected_failure_code=None,
               extra_disk_images=(), ui_scenario=None, record_frames=False, source_read_bps=None, source_serial="PB-SOURCE-0001",
               network="none", optical_iso=None, legacy_bios=False, expect_failure_stay=False,
-              serial_port=True):
+              serial_port=True, firmware_variables=None):
     assert usb_format in ["raw", "vhdx"]
     assert isinstance(cpus, int) and 1 <= cpus <= 32
     assert isinstance(memory_mib, int) and 512 <= memory_mib <= 16384
@@ -35,7 +35,9 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
     variables = work / "OVMF_VARS.fd"
     firmware = "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd" if secure_firmware else "/usr/share/OVMF/OVMF_CODE_4M.fd"
     if not legacy_bios:
-        shutil.copyfile("/usr/share/OVMF/OVMF_VARS_4M.ms.fd" if secure_boot else "/usr/share/OVMF/OVMF_VARS_4M.fd", variables)
+        if firmware_variables is not None:
+            assert firmware_variables.is_file() and not firmware_variables.is_symlink()
+        shutil.copyfile(firmware_variables or ("/usr/share/OVMF/OVMF_VARS_4M.ms.fd" if secure_boot else "/usr/share/OVMF/OVMF_VARS_4M.fd"), variables)
     qmp_path = work / "qmp.sock"
     argv = ["qemu-system-x86_64", "-machine", "q35,accel=tcg" + (",smm=on" if secure_firmware else ""), "-cpu", "max", "-smp", str(cpus), "-m", str(memory_mib),
             *([] if legacy_bios else ["-drive", "if=pflash,format=raw,unit=0,readonly=on,file=" + firmware,

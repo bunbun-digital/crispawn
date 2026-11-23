@@ -13,6 +13,12 @@ fn main() {
         }
     }
     let result = match args.as_slice() {
+        [mode, length, retries, delay] if mode == "inspect-ntfs" => {
+            match (length.parse(), retries.parse(), delay.parse()) {
+                (Ok(length), Ok(retries), Ok(delay)) => crispawn_engine::live::inspect_ntfs_child(length, retries, delay),
+                _ => Err(crispawn_engine::Error::new("ARGUMENT_ERROR", "invalid read-only inspector arguments")),
+            }
+        }
         [] => crispawn_engine::live::run(),
         [mode, path] if mode == "watch" => {
             crispawn_engine::live::watch(std::path::Path::new(path))

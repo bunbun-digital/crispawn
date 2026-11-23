@@ -45,6 +45,7 @@ new ordinary disk image files and do not format physical devices.
 ```sh
 python3 tools/test-crispawn-media-qemu.py --iso /path/to/the/generated.iso --work .orchestrator-test/unique-run
 python3 tools/test-crispawn-console-qemu.py --iso /path/to/the/generated.iso --work .orchestrator-test/unique-console-run
+python3 tools/test-crispawn-ntfs-qemu.py --iso /path/to/the/generated.iso --work .orchestrator-test/unique-ntfs-run
 ```
 
 The ISO uses signed Debian kernel/shim/GRUB with Buildroot userspace. The
@@ -57,4 +58,9 @@ It checks the actual QEMU device tree, captures GUI frames, and independently
 reads the committed archive, BLAKE3 verification results and logs from NTFS.
 Guest poweroff alone does not pass this test. Without a UART, live probes
 are unavailable; the persistent NTFS evidence remains authoritative.
+
+The NTFS regression covers clean copy/readback, dirty-volume refusal without
+NTFS writes, unreadable metadata, and actual kernel mount-error capture. See
+[NTFS diagnostics](docs/NTFS-DIAGNOSTICS.md) for the error codes, diagnostic
+persistence and the separate Windows-formatted-media test.
 

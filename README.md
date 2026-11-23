@@ -125,6 +125,11 @@ follow the selected language; failure logs are retained when storage remains
 usable. `failure.action` selects an error display that stays on screen or a
 delayed poweroff.
 
+Dirty NTFS volumes are not force-mounted. When NTFS cannot be used, a diagnostic
+is retained in memory and, when logging and the writable FAT boot partition are
+available, under `crispawn/diagnostics` on that boot partition. See
+[NTFS startup diagnostics](docs/NTFS-DIAGNOSTICS.md).
+
 ## Compression
 
 CRISPAWN supports **zstd (Zstandard), gzip and xz**. The standard `balanced`

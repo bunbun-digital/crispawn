@@ -105,6 +105,10 @@ BuilderはUSBへ書き込む前に、このファイルの5項目が以下の内
 エラーメッセージは選択した言語で表示します。失敗ログは保存先が利用可能な範囲で残します。
 `failure.action`で、エラー画面を表示したままにするか、待ち時間を表示してから電源OFFするかを選べます。
 
+dirty状態のNTFSを強制的に書き込み可能にはしません。NTFSを利用できないときは診断をメモリに残し、
+ログ保存が有効で起動用FATパーティションに書き込める場合は、その`crispawn/diagnostics`にも保存します。
+詳しくは[NTFS起動診断](docs/NTFS-DIAGNOSTICS.md)を参照してください。
+
 ## 圧縮方式
 
 CRISPAWNはzstd（Zstandard）、gzip、xzに対応しています。標準の`balanced`設定ではzstdのレベル3から開始し、

@@ -45,6 +45,11 @@ pub const LOG_CAP: u64 = 16 << 20;
 /// The media-layout v2 filename, relative to the mounted USB boot volume.
 pub const USB_BOOT_ISO: &str = "crispawn.iso";
 
+#[doc(hidden)]
+pub fn inspect_ntfs_child(length: u64, retries: u32, delay_ms: u64) -> Result<()> {
+    crate::ntfs_diagnostics::child(length, retries, delay_ms)
+}
+
 pub fn verify_usb_boot_iso(boot_root: &Path) -> Result<PathBuf> {
     let path = boot_root.join(USB_BOOT_ISO);
     let file = io::open_regular(&path, false).map_err(|error| {
@@ -507,12 +512,13 @@ impl Mounted {
             .map_err(|_| Error::new("INVALID_PATH", "NUL"))?;
         let dst = CString::new(path.as_os_str().as_bytes()).unwrap();
         let fs_name = CString::new(filesystem).unwrap();
+        let ntfs_options = CString::new(crate::ntfs_diagnostics::MOUNT_OPTIONS).unwrap();
         let options = if filesystem == "iso9660" {
             c""
         } else if filesystem == "vfat" {
             c"uid=0,gid=0,umask=077,iocharset=utf8"
         } else {
-            c"uid=0,gid=0,umask=077,iocharset=utf8,windows_names"
+            ntfs_options.as_c_str()
         };
         // SAFETY: validated block device, owned empty mountpoint, fixed filesystem/options.
         if unsafe {
@@ -528,14 +534,13 @@ impl Mounted {
             )
         } != 0
         {
-            return Err(Error::new(
-                if filesystem == "iso9660" {
-                    "BOOT_MOUNT_FAILED"
-                } else {
-                    "NTFS_MOUNT_FAILED"
-                },
-                std::io::Error::last_os_error().to_string(),
-            ));
+            let mut error = Error::from(std::io::Error::last_os_error());
+            error.code = if filesystem == "iso9660" {
+                "BOOT_MOUNT_FAILED"
+            } else {
+                "NTFS_MOUNT_FAILED"
+            };
+            return Err(error);
         }
         let mounted = Self {
             device,
@@ -568,6 +573,61 @@ impl Mounted {
             return Err(std::io::Error::last_os_error().into());
         }
         Ok(())
+    }
+    /// If NTFS is unavailable, retain one bounded diagnostic on our verified
+    /// FAT boot partition. Never mount the failed NTFS, touch EFI/ISO files or
+    /// use this fallback when logging is disabled or the boot medium is RO.
+    fn save_mount_diagnostic(&self, bytes: &[u8], job_id: &str) -> Result<PathBuf> {
+        require(
+            self.filesystem == "vfat" && bytes.len() <= 32 << 10,
+            "BOOT_DIAGNOSTICS_UNAVAILABLE",
+            "a writable FAT boot partition is required",
+        )?;
+        require(
+            job_id.len() == 32 && job_id.bytes().all(|b| b.is_ascii_hexdigit()),
+            "INVALID_PATH",
+            "invalid diagnostics job identifier",
+        )?;
+        self.check()?;
+        verify_usb_boot_iso(&self.path)?;
+        let target = CString::new(self.path.as_os_str().as_bytes()).unwrap();
+        let remount = |read_only: bool| -> Result<()> {
+            // SAFETY: exact owned, identity-checked FAT mount; no force option.
+            if unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    target.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_REMOUNT
+                        | libc::MS_NODEV
+                        | libc::MS_NOSUID
+                        | libc::MS_NOEXEC
+                        | if read_only { libc::MS_RDONLY } else { 0 },
+                    std::ptr::null(),
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            Ok(())
+        };
+        remount(false)?;
+        let saved = (|| {
+            let folder = owned_directory(&self.path, "crispawn/diagnostics")?;
+            let path = folder.join(format!("ntfs-mount-{job_id}.json"));
+            let mut file = io::create_new(&path)?;
+            io::write_all(&mut file, bytes)?;
+            io::sync_file(&file)?;
+            io::sync_dir(&folder)?;
+            self.sync()?;
+            Ok(path)
+        })();
+        // Also attempted after a failed create/write; return RO before shutdown.
+        let closed = remount(true);
+        match (saved, closed) {
+            (_, Err(error)) => Err(error),
+            (saved, Ok(())) => saved,
+        }
     }
     fn unmount(&self) -> Result<()> {
         self.sync()?;
@@ -1285,7 +1345,51 @@ fn run_inner(
         }))?,
     )?;
     diag.phase("MOUNTING_NTFS", "mounting the configured NTFS data volume");
-    let mount = Mounted::mount(data, root.join("destination"))?;
+    let mut attempt = crate::ntfs_diagnostics::Attempt::begin(
+        &data,
+        &root.join("destination"),
+        &config.tuning.io_policy,
+    );
+    let mounted = attempt.preflight().and_then(|()| {
+        attempt.report.mount_attempted = true;
+        Mounted::mount(data, root.join("destination"))
+    });
+    let mount = match mounted {
+        Ok(mount) => {
+            let (report, _) = attempt.finish(None);
+            diag.record(
+                "ntfs_mount_diagnostics",
+                serde_json::to_value(report).unwrap(),
+            );
+            mount
+        }
+        Err(error) => {
+            let (mut report, error) = attempt.finish(Some(error));
+            report.user_message = Some(
+                config
+                    .language
+                    .error_detail(&error.as_ref().unwrap().to_string()),
+            );
+            let bytes = io::json(&report)?;
+            let saved = io::atomic_write(root, "ntfs-mount-diagnostics.json", &bytes);
+            diag.record("ntfs_mount_failure", serde_json::to_value(report).unwrap());
+            if let Err(save_error) = saved {
+                diag.record(
+                    "ntfs_diagnostics_save_failed",
+                    json!({"error":save_error.to_string()}),
+                );
+            }
+            if config.log_policy != LogPolicy::Never {
+                if let Some(boot) = boot_mount.as_ref().filter(|b| b.filesystem == "vfat") {
+                    match boot.save_mount_diagnostic(&bytes, &diag.snapshot().job_id) {
+                        Ok(path) => diag.record("ntfs_diagnostics_persisted", json!({"path":path,"medium":"boot_esp","ntfs_written":false})),
+                        Err(error) => diag.record("ntfs_diagnostics_persist_failed", json!({"error":error.to_string(),"ram_path":"/run/crispawn/ntfs-mount-diagnostics.json"})),
+                    }
+                }
+            }
+            return Err(error.unwrap());
+        }
+    };
     diag.status
         .lock()
         .unwrap_or_else(|e| e.into_inner())

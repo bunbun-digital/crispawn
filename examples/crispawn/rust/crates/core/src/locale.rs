@@ -88,6 +88,10 @@ pub enum Text {
     ErrorFull,
     ErrorIo,
     ErrorBootIso,
+    ErrorNtfsDirty,
+    ErrorNtfsState,
+    ErrorNtfsJournal,
+    ErrorNtfsMount,
     ErrorDevice,
     ErrorReadOnly,
     ErrorSource,
@@ -238,6 +242,10 @@ impl Language {
             Text::ErrorFull => ("保存先の空き容量が不足しています。処理を中止しました。", "The destination is full. The operation was stopped."),
             Text::ErrorIo => ("ディスクの読み書きに失敗したため、中止しました。", "A disk read or write failed. The operation was stopped."),
             Text::ErrorBootIso => ("起動用ISO「/crispawn.iso」が見つかりません。起動用USBを作り直してください。", "The boot ISO /crispawn.iso was not found. Recreate the boot USB."),
+            Text::ErrorNtfsDirty => ("保存先のNTFSがdirty状態のため停止しました。Windowsで修復してください。または必要なデータを退避し、BuilderでUSBを初期化して作り直してください。", "The destination NTFS is marked dirty. Repair it in Windows, or save any needed files before reinitializing the USB drive with Builder."),
+            Text::ErrorNtfsState => ("保存先のNTFSの状態を読み取れません。安全のため書き込まずに停止しました。詳細は内部ログを確認してください。", "The NTFS state could not be read. Stopped without a writable mount. See the internal log for details."),
+            Text::ErrorNtfsJournal => ("保存先のNTFSの更新履歴を回復できません。Windowsでエラーチェックしてください。", "The NTFS journal could not be replayed. Check the drive in Windows."),
+            Text::ErrorNtfsMount => ("保存先のNTFSを利用できません。対象パーティションとカーネルの診断を内部ログに記録しました。", "The NTFS destination could not be mounted. Partition and kernel diagnostics are in the internal log."),
             Text::ErrorDevice => ("必要なディスクが見つからないか、接続が切れました。", "A required disk is missing or was disconnected."),
             Text::ErrorReadOnly => ("保存先に書き込めません。書き込み保護を確認してください。", "The destination is read-only. Check its write protection."),
             Text::ErrorSource => ("対象ディスクの状態が変わったため、安全のため中止しました。", "The source disk changed. The operation was stopped for safety."),
@@ -261,6 +269,10 @@ impl Language {
             "DESTINATION_FULL" | "INSUFFICIENT_SPACE" => Text::ErrorFull,
             "IO_ERROR" | "DIAGNOSTIC_LOG_FAILED" | "NTFS_SYNC_FAILED" => Text::ErrorIo,
             "BOOT_ISO_NOT_FOUND" => Text::ErrorBootIso,
+            "NTFS_VOLUME_DIRTY" => Text::ErrorNtfsDirty,
+            "NTFS_STATE_UNAVAILABLE" => Text::ErrorNtfsState,
+            "NTFS_JOURNAL_REPLAY_FAILED" => Text::ErrorNtfsJournal,
+            "NTFS_MOUNT_FAILED" => Text::ErrorNtfsMount,
             "DEVICE_UNAVAILABLE"
             | "SOURCE_NOT_FOUND"
             | "BOOT_VOLUME_NOT_FOUND"
@@ -322,6 +334,34 @@ impl Language {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ntfs_failures_have_distinct_japanese_and_english_reasons() {
+        for (code, ja, en) in [
+            ("NTFS_VOLUME_DIRTY", "dirty状態", "dirty"),
+            (
+                "NTFS_STATE_UNAVAILABLE",
+                "状態を読み取れません",
+                "state could not be read",
+            ),
+            ("NTFS_JOURNAL_REPLAY_FAILED", "更新履歴", "journal"),
+            ("NTFS_MOUNT_FAILED", "カーネルの診断", "kernel diagnostics"),
+        ] {
+            assert!(Language::Ja
+                .error_detail(&format!("{code}: raw partition detail"))
+                .contains(ja));
+            assert!(Language::En
+                .error_detail(&format!("{code}: raw partition detail"))
+                .contains(en));
+            assert!(!Language::Ja
+                .error_detail(&format!("{code}: raw partition detail"))
+                .contains("raw partition"));
+        }
+        for language in [Language::Ja, Language::En] {
+            let text = language.error_detail("NTFS_VOLUME_DIRTY: raw detail");
+            assert!(text.contains("Windows") && text.contains("Builder"));
+        }
+    }
     #[test]
     fn failure_reasons_are_translated_without_exposing_raw_error_detail() {
         let ja = Language::Ja.error_detail("DESTINATION_LOW_SPACE: private raw filesystem detail");
