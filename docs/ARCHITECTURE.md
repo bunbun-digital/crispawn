@@ -16,7 +16,7 @@ Its runtime rejects all explicit network modes and SMB/S3 destinations.
 The Debian signed kernel and third-party driver licenses remain independent.
 
 The public [CRISPAWN Builder](https://github.com/bunbun-digital/crispawn-builder)
-repository is maintained separately. Boot configuration interfaces, versioned
-archive contracts and the C UI ABI retain their existing identifiers; see
-[integration compatibility](COMPATIBILITY.md). These identifiers are not product names.
+repository is maintained separately. Boot configuration interfaces and versioned
+archive contracts preserve compatibility; see [integration compatibility](COMPATIBILITY.md).
+Source packages, commands and the shared UI API use the CRISPAWN namespace.
 

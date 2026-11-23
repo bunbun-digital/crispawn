@@ -18,6 +18,10 @@ the Buildroot-pinned Bootlin musl compiler, and Debian signed packages.
 Checksums, the Debian kernel ABI and signatures are verified before composition.
 The Rust Cargo.lock is mandatory. No preserved CRISPAWN ISO or private SDK is used.
 
+For the CRISPAWN naming transition, use a fresh checkout with its own build
+directory and keep the previous checkout and build artifacts. Older caches
+contain packages with the previous names.
+
 The build prints its report path; the report identifies the generated ISO.
 Logs, toolchains and temporary builds are in ignored `build/` and
 `.orchestrator*/` directories. Allow at least

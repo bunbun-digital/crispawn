@@ -34,7 +34,8 @@ pause.shortcut('p')?;
 `Ui::memory()`、`render_rgb()`、`send_key()`、`send_shortcut()`は開発用で、画面・入力deviceを開かず実LVGLの描画と入力を検査します。
 通常起動の`Ui::open()`ではfontファイルのpathをアプリへ持たせません。
 
-C ABIは[`crispawn/widgets.h`](../../../br2-external/package/crispawn-ui-runtime/src/crispawn/widgets.h)に定義し、旧`ui.h` APIは維持します。
+C APIは[`crispawn/widgets.h`](../../../br2-external/package/crispawn-ui-runtime/src/crispawn/widgets.h)に定義し、LVGLを直接扱うAPIは[`crispawn/ui.h`](../../../br2-external/package/crispawn-ui-runtime/src/crispawn/ui.h)で提供します。
+Rust SDKと共有ライブラリは、同じビルドから生成したものを組み合わせて利用します。
 既存CコードでLVGLの初期化・破棄を並行して行う利用は対象外です。Rustからのsafeな利用でもC実装の全不具合を排除するものではありません。
 build時は`CRISPAWN_UI_LIB_DIR`と、同じOS SDKのtarget/linkerをそろえます。[CRISPAWNのビルド手順](../../../BUILDING.md)を参照してください。
 独自部分はApache-2.0、LVGL等の第三者部分の条件は維持します。
