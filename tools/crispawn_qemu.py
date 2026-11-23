@@ -14,7 +14,8 @@ import time
 def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False, secure_boot=False, usb_format="raw", capture_gui=False,
               exercise_shortcuts=False, cpus=2, memory_mib=1536, expected_failure_code=None,
               extra_disk_images=(), ui_scenario=None, record_frames=False, source_read_bps=None, source_serial="PB-SOURCE-0001",
-              network="none", optical_iso=None, legacy_bios=False, expect_failure_stay=False):
+              network="none", optical_iso=None, legacy_bios=False, expect_failure_stay=False,
+              serial_port=True):
     assert usb_format in ["raw", "vhdx"]
     assert isinstance(cpus, int) and 1 <= cpus <= 32
     assert isinstance(memory_mib, int) and 512 <= memory_mib <= 16384
@@ -22,6 +23,10 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
     assert not (legacy_bios and secure_boot)
     assert not legacy_bios or optical_iso is not None
     assert not expect_failure_stay or expected_failure_code is not None
+    assert type(serial_port) is bool
+    # With no UART there are no live probes. The caller must validate the
+    # persisted NTFS archive/logs and captured GUI, separately from shutdown.
+    assert serial_port or not (expected_failure_code or exercise_shortcuts or ui_scenario or expect_failure_stay)
     assert shutil.disk_usage(evidence).free >= 10 * 1024**3, "infrastructure: need at least 10 GiB free before the owned VM test"
     # Use the same capable firmware for optical Secure Boot on/off comparisons.
     # An empty private VARS store disables Secure Boot without dropping the
@@ -41,7 +46,7 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
             "-drive", f"if=none,id=source,format=raw,file={disk_image}" + (",readonly=on" if readonly else "") +
                       (f",throttling.bps-read={int(source_read_bps)}" if source_read_bps else ""),
             "-device", f"nvme,drive=source,serial={source_serial}",
-            "-vga", "std", "-display", "none", "-serial", "stdio", "-monitor", "none",
+            "-vga", "std", "-display", "none", "-serial", "stdio" if serial_port else "none", "-monitor", "none",
             "-qmp", f"unix:{qmp_path},server=on,wait=off", "-no-reboot"]
     if optical_iso is not None:
         assert optical_iso.is_file() and not optical_iso.is_symlink()
@@ -130,6 +135,12 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
 
             execute("qmp_capabilities")
             resources = {"cpus": execute("query-cpus-fast"), "memory": execute("query-memory-size-summary")}
+            resources['serial_port'] = serial_port
+            if not serial_port:
+                tree = execute('human-monitor-command', {'command-line':'info qtree'})
+                (evidence/'device-tree.txt').write_text(tree)
+                assert not any(name in tree for name in ('isa-serial', 'pci-serial', 'virtio-serial'))
+                resources['chardevs'] = execute('query-chardev')
             assert len(resources["cpus"]) == cpus and resources["memory"]["base-memory"] == memory_mib * 1024**2
             (evidence / "qemu-resources.json").write_text(json.dumps(resources, indent=2) + "\n")
             captured = set()
@@ -158,7 +169,7 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
                         raise AssertionError("guest failure: " + probes[-1]["detail"])
                     try:
                         status = execute("query-status")
-                        phase = probes[-1]["phase"] if probes else "firmware"
+                        phase = probes[-1]["phase"] if probes else ("firmware" if serial_port else "unobserved-no-serial")
                         if capture_gui and phase == 'FAILED':
                             if failure_seen is None: failure_seen = time.monotonic()
                             if time.monotonic() - failure_seen >= .75 and not (evidence/'failure.png').exists():
@@ -277,7 +288,11 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
             assert not any(e.get('event') == 'SHUTDOWN' and e.get('data',{}).get('guest') is True for e in qmp_events)
         else:
             assert any(e.get("event") == "SHUTDOWN" and e.get("data", {}).get("guest") is True for e in qmp_events)
-        if expected_failure_code is None:
+        if not serial_port:
+            # A normal poweroff alone is not backup acceptance. The dedicated
+            # console regression test independently reads the NTFS result.
+            assert not probes and not failures
+        elif expected_failure_code is None:
             assert any(p["phase"] == "UNMOUNTED" and not p["ntfs_mounted"] for p in probes)
             assert any(p["phase"] == "POWEROFF_REQUESTED" and p["poweroff_requested"] for p in probes)
         else:

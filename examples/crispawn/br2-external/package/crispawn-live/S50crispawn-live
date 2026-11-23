@@ -1,9 +1,25 @@
 #!/bin/sh
 # Copyright (c) 2026 bunbun-liveos contributors. Licensed under Apache-2.0.
+# Redirect the function itself so a failed serial open is caught before the
+# asynchronous launch. A device node can exist even without a usable UART.
+launch_live() {
+    /usr/bin/crispawn-live </dev/null 2>&1 &
+    live_pid=$!
+}
+launch_serial() {
+    # Some UART nodes open successfully but fail their first write.
+    printf 'CRISPAWN_LIVE_START\n' || return 1
+    launch_live
+}
 case "$1" in
     start)
-        /usr/bin/crispawn-live </dev/null >/dev/ttyS0 2>&1 &
-        echo "$!" >/run/crispawn-live.pid
+        if [ -c /dev/ttyS0 ] && launch_serial 2>/dev/null >/dev/ttyS0; then
+            : # Preserve UART diagnostics when the device can actually open.
+        else
+            # Structured RAM/NTFS logs do not depend on this diagnostic stream.
+            launch_live >/dev/null 2>&1
+        fi
+        echo "$live_pid" >/run/crispawn-live.pid
         ;;
     stop)
         start-stop-daemon -K -q -p /run/crispawn-live.pid
