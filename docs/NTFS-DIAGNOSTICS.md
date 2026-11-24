@@ -121,3 +121,9 @@ chain still produced the same warning with four-byte synthetic options. It was
 not adopted. Keep the pinned Debian chain until a replacement actually meets
 the boot, signature and warning criteria. Physical Fujitsu message suppression
 and the original NTFS failure cause require fresh physical evidence.
+
+A later [signed compatibility-stage experiment](SHIM-COMPATIBILITY.md) removed
+the synthetic warning using an unchanged Ubuntu shim/GRUB before the existing
+Debian chain. Secure Boot, copy, NTFS readback and native restore passed in that
+virtual test. Production adoption requires coordinated Builder EFI placement;
+the published ISO and the physical Fujitsu result remain unchanged.
