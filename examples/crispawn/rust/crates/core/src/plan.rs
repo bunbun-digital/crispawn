@@ -17,6 +17,9 @@ pub const MAX_BACKUP_FILE_BYTES: u64 = 2_000_000_000;
 #[serde(deny_unknown_fields)]
 pub struct Plan {
     pub format_version: u32,
+    /// Physical part files, independently checked by encoded-byte BLAKE3.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub segmented_storage: bool,
     #[serde(with = "decimal")]
     pub range_bytes: u64,
     #[serde(with = "decimal")]
@@ -35,6 +38,7 @@ impl Default for Plan {
     fn default() -> Self {
         Self {
             format_version: 1,
+            segmented_storage: false,
             range_bytes: 8 << 20,
             container_bytes: 256 << 20,
             read_bytes: 1 << 20,
@@ -57,6 +61,11 @@ impl Plan {
         }
     }
     pub fn validate(&self, source_bytes: u64) -> Result<()> {
+        require(
+            !self.segmented_storage || self.format_version == 3,
+            "INVALID_PLAN",
+            "segmented storage requires v3 framing",
+        )?;
         require(
             matches!(self.format_version, 1 | 2 | 3),
             "UNKNOWN_VERSION",
@@ -165,7 +174,17 @@ impl Plan {
         // Serialized archive plans retain their historical validation bound.
         // The engine reserves new runtime queues separately, so old backups
         // remain readable even when their previous memory ceiling was tight.
-        buffers + u64::from(self.workers) * workspace + (128 << 20)
+        buffers
+            + u64::from(self.workers) * workspace
+            + (128 << 20)
+            + if self.segmented_storage {
+                u64::from(self.regions) * (self.storage_buffer_bytes() + 32768 * 512) + (32 << 20)
+            } else {
+                0
+            }
+    }
+    pub fn storage_buffer_bytes(&self) -> u64 {
+        (self.memory_limit_bytes / 32 / u64::from(self.regions.max(1))).clamp(64 << 10, 16 << 20)
     }
 }
 

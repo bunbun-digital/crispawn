@@ -221,6 +221,7 @@ pub trait EventSink: Send + Sync {
     /// Actual completed source reads; queued bytes are encoded payload/storage,
     /// never durable or verified progress.
     fn prefetch(&self, _backup_id: &str, _read: u64, _queued: u64, _budget: u64) {}
+    fn storage_progress(&self, _backup_id: &str, _status: &crate::live::StorageStatus) {}
     /// Productive-copy feedback; observers must never affect source coverage.
     fn settings(
         &self,

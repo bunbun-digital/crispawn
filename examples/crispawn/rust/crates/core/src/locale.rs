@@ -44,6 +44,7 @@ pub enum Text {
     AbortRestoreWarning,
     Overall,
     Eta,
+    Elapsed,
     Estimating,
     Read,
     Durable,
@@ -101,10 +102,36 @@ pub enum Text {
     ErrorMemory,
     ErrorGeneric,
     FailureStopped,
+    StorageQueue,
+    CurrentWrite,
+    WriteWorkers,
+    ReadSpeed,
+    WriteSpeed,
+    StorageConfirmed,
+    StorageBaseline,
+    StorageWriting,
+    StorageSyncing,
+    StorageChecking,
+    StorageMetadata,
+    StorageReady,
+    StorageElapsed,
 }
 impl Language {
     pub fn text(self, key: Text) -> &'static str {
         let pair = match key {
+            Text::StorageQueue => ("書込待ちブロック", "Queued write blocks"),
+            Text::CurrentWrite => ("現在のファイル", "Current file"),
+            Text::WriteWorkers => ("書込並列度", "Write workers"),
+            Text::ReadSpeed => ("読出速度", "Read speed"),
+            Text::WriteSpeed => ("書込速度（同期済み）", "Write speed (synced)"),
+            Text::StorageConfirmed => ("保存データの確認（圧縮後）", "Stored data check (compressed)"),
+            Text::StorageBaseline => ("基準サイズ", "Baseline size"),
+            Text::StorageWriting => ("書き込み中", "Writing"),
+            Text::StorageSyncing => ("USBへの同期を待っています", "Waiting for USB sync"),
+            Text::StorageChecking => ("保存したデータを確認しています", "Checking stored bytes"),
+            Text::StorageMetadata => ("管理情報を保存しています", "Saving metadata"),
+            Text::StorageReady => ("次の書き込みを待っています", "Waiting for the next write"),
+            Text::StorageElapsed => ("秒経過", "seconds elapsed"),
             Text::Copy => ("コピー", "Copy"),
             Text::Restore => ("復元", "Restore"),
             Text::Selected => ("✓ 選択中", "✓ Selected"),
@@ -177,6 +204,7 @@ impl Language {
             ),
             Text::Overall => ("全体の進捗", "Overall progress"),
             Text::Eta => ("すべて完了するまでの目安", "Estimated time remaining"),
+            Text::Elapsed => ("経過時間", "Elapsed time"),
             Text::Estimating => ("推定中", "Estimating"),
             Text::Read => ("読出し", "Read"),
             Text::Durable => ("保存済み（元データ換算）", "Saved (original data)"),
@@ -261,6 +289,24 @@ impl Language {
             Language::En => pair.1,
         }
     }
+    pub fn storage_summary(self, s: &crate::live::StorageStatus) -> String {
+        let phase = match s.phase.as_str() {
+            "WRITING" => Text::StorageWriting,
+            "SYNCING" => Text::StorageSyncing,
+            "CHECKING" => Text::StorageChecking,
+            "SAVING_METADATA" => Text::StorageMetadata,
+            _ => Text::StorageReady,
+        };
+        let unit = match self {
+            Language::Ja => "MB/秒",
+            Language::En => "MB/s",
+        };
+        format!("{} {} · {} {:.1} MB · {} {}\n{} {:.1} {unit} · {} {:.1} {unit}\n{} · {:.1} {} · {} {:.1} MB",
+            self.text(Text::StorageQueue),s.waiting_blocks,self.text(Text::CurrentWrite),s.current_file_bytes as f64/1e6,
+            self.text(Text::WriteWorkers),s.write_workers,self.text(Text::ReadSpeed),s.read_mb_per_second,
+            self.text(Text::WriteSpeed),s.write_mb_per_second,self.text(phase),s.phase_elapsed_ms as f64/1000.0,
+            self.text(Text::StorageElapsed),self.text(Text::StorageBaseline),s.baseline_bytes as f64/1e6)
+    }
     /// Display a translated reason while retaining machine codes and raw detail in logs.
     pub fn error_detail(self, detail: &str) -> String {
         let code = detail.split(':').next().unwrap_or("");
@@ -284,6 +330,8 @@ impl Language {
             | "PREPARATION_FAILED"
             | "OPTICAL_DESTINATION_UUID_REQUIRED" => Text::ErrorConfig,
             "HASH_MISMATCH"
+            | "STORED_HASH_MISMATCH"
+            | "INVALID_STORAGE_PART"
             | "DATA_HASH_MISMATCH"
             | "VERIFY_MISMATCH"
             | "MISSING_VERIFICATION"

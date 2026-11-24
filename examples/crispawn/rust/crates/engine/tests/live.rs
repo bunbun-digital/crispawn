@@ -13,6 +13,97 @@ use std::{
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
 };
+#[test]
+fn storage_progress_is_visible_without_a_new_writer_snapshot_and_formats_both_languages() {
+    use crispawn_core::{
+        live::StorageStatus,
+        presentation::{Interaction, Language, Page},
+    };
+    use crispawn_engine::job::{JobEvent, JobEvents};
+    let directory = tempfile::tempdir().unwrap();
+    let diag = Diagnostics::new(&directory.path().join("ram"), 64 << 10, "a".repeat(32)).unwrap();
+    let snapshot:crispawn_core::types::Snapshot=serde_json::from_value(json!({"schema_version":1,"backup_id":"a".repeat(32),"seq":0,"phase":"COPYING","code":"BACKUP_STARTED",
+        "total_bytes":"256000000000","read_raw_bytes":"17000000000","durable_raw_bytes":"4000000000","verified_raw_bytes":"2000000000","stored_bytes":"400000000",
+        "elapsed_seconds":125.0,"eta_seconds":900.0,"verification_kind":"compressed_blake3"})).unwrap();
+    diag.emit(JobEvent::Progress {
+        snapshot,
+        percent: 1,
+        eta_seconds: Some(900),
+        phase: "COPYING".into(),
+    });
+    let storage = StorageStatus {
+        phase: "SYNCING".into(),
+        written_blocks: 100,
+        confirmed_blocks: 99,
+        waiting_blocks: 1500,
+        queued_encoded_bytes: 6000000000,
+        current_file_bytes: 4000000,
+        baseline_bytes: 4000000,
+        write_workers: 1,
+        written_bytes: 400000000,
+        confirmed_bytes: 396000000,
+        phase_elapsed_ms: 3100,
+        read_mb_per_second: 35.2,
+        write_mb_per_second: 1.7,
+        calibrated: true,
+        elapsed_seconds: 125,
+        ..Default::default()
+    };
+    diag.emit(JobEvent::StorageProgress {
+        backup_id: "a".repeat(32),
+        status: storage.clone(),
+    });
+    let mut s = diag.snapshot();
+    assert_eq!(s.storage.as_ref().unwrap().confirmed_bytes, 396000000);
+    assert_eq!(s.snapshot.as_ref().unwrap().durable_raw_bytes, 4000000000);
+    let mut foreign = storage.clone();
+    foreign.confirmed_bytes = 0;
+    diag.emit(JobEvent::StorageProgress {
+        backup_id: "b".repeat(32),
+        status: foreign,
+    });
+    assert_eq!(
+        diag.snapshot().storage.as_ref().unwrap().confirmed_bytes,
+        396000000
+    );
+    s.session.page = Page::Running;
+    s.selected_plan = Some(crispawn_core::plan::Plan {
+        format_version: 3,
+        segmented_storage: true,
+        workers: 8,
+        ..Default::default()
+    });
+    s.source_bytes = 256000000000;
+    s.source_disk = "NVMe SSD".into();
+    s.eta_seconds = Some(900);
+    s.can_pause = true;
+    s.can_cancel = true;
+    let text = crispawn_engine::console::render(&s, &Interaction::default(), "").unwrap();
+    assert!(
+        text.contains("1500")
+            && text.contains("4.0 MB")
+            && text.contains("MB/秒")
+            && text.contains("00:02:05")
+    );
+    assert!(Language::En
+        .storage_summary(&storage)
+        .contains("Write workers 1"));
+    if let Some(path) = std::env::var_os("CRISPAWN_TEST_RENDER_DIR") {
+        let path = PathBuf::from(path);
+        fs::create_dir_all(&path).unwrap();
+        for (language, name) in [(Language::Ja, "ja"), (Language::En, "en")] {
+            s.language = language;
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path.join(format!("storage-{name}.json")))
+                .unwrap();
+            serde_json::to_writer_pretty(file, &s).unwrap();
+        }
+    }
+    diag.flush().unwrap();
+    diag.stop();
+}
 
 #[test]
 fn read_ahead_updates_actual_read_count_without_claiming_durability_or_regressing() {

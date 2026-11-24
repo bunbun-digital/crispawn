@@ -69,3 +69,6 @@ described in [Copy pipeline and failure records](docs/IO-PIPELINE.md). Native
 tests exercise held-checkpoint overlap and bounded failure handling using
 ordinary temporary files, separately from VM and physical-device acceptance.
 
+The current automatic-copy storage layout and its soft five-second sizing policy
+are specified in [Segmented compressed storage](docs/SEGMENTED-STORAGE.md).
+

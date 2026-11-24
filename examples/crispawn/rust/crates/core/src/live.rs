@@ -27,6 +27,29 @@ pub struct Destination {
     pub kind: DestinationKind,
     pub filesystem: Option<String>,
 }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageStatus {
+    pub phase: String,
+    pub written_blocks: u64,
+    pub confirmed_blocks: u64,
+    pub waiting_blocks: u64,
+    pub queued_encoded_bytes: u64,
+    pub current_file_bytes: u64,
+    pub baseline_bytes: u64,
+    pub write_workers: u32,
+    pub written_bytes: u64,
+    pub confirmed_bytes: u64,
+    pub phase_elapsed_ms: u64,
+    pub read_mb_per_second: f64,
+    pub write_mb_per_second: f64,
+    pub calibrated: bool,
+    pub elapsed_seconds: u64,
+    pub calibration_bytes: u64,
+    pub calibration_elapsed_ms: u64,
+    pub last_write_elapsed_ms: u64,
+    pub last_check_elapsed_ms: u64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Status {
@@ -74,6 +97,8 @@ pub struct Status {
     #[serde(default = "one_verifier")]
     pub verify_workers: u32,
     pub snapshot: Option<Snapshot>,
+    #[serde(default)]
+    pub storage: Option<StorageStatus>,
     pub percent: u32,
     pub eta_seconds: Option<u64>,
     pub can_pause: bool,
@@ -124,6 +149,7 @@ impl Status {
             selected_plan: None,
             verify_workers: 1,
             snapshot: None,
+            storage: None,
             percent: 0,
             eta_seconds: None,
             can_pause: false,

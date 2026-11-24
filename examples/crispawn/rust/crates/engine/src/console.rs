@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn screen(s: &Status, input: &Interaction, logs: &str) -> Result<String> {
+pub fn render(s: &Status, input: &Interaction, logs: &str) -> Result<String> {
     let l = s.language;
     let v = &s.session;
     let mut text = String::from("\x1b[2J\x1b[HCRISPAWN\n[B] ");
@@ -134,6 +134,23 @@ fn screen(s: &Status, input: &Interaction, logs: &str) -> Result<String> {
         }
         _ => {
             text.push_str(&format!("{}\n", s.phase));
+            if let Some(storage) = &s.storage {
+                text.push_str(&format!(
+                    "{} {:02}:{:02}:{:02}\n",
+                    l.text(T::Elapsed),
+                    storage.elapsed_seconds / 3600,
+                    storage.elapsed_seconds / 60 % 60,
+                    storage.elapsed_seconds % 60
+                ));
+                text.push_str(&l.storage_summary(storage));
+                text.push('\n');
+                text.push_str(&format!(
+                    "{}: {} / {} bytes\n",
+                    l.text(T::StorageConfirmed),
+                    storage.confirmed_bytes,
+                    storage.written_bytes
+                ));
+            }
             if let Some(p) = &s.snapshot {
                 for (key, n) in [
                     (T::Read, p.read_raw_bytes),
@@ -216,7 +233,7 @@ pub fn run(root: &Path) -> Result<()> {
             } else {
                 String::new()
             };
-            print!("{}", screen(&s, &input, &logs)?);
+            print!("{}", render(&s, &input, &logs)?);
             std::io::stdout().flush()?;
             last = Instant::now();
         }
@@ -252,12 +269,12 @@ mod tests {
         s.phase = "FAILED".into();
         s.detail = "DESTINATION_LOW_SPACE: raw English detail".into();
         s.shutdown_countdown_seconds = Some(7);
-        let text = screen(&s, &Interaction::default(), "").unwrap();
+        let text = render(&s, &Interaction::default(), "").unwrap();
         assert!(text.contains("空き容量が1GB"));
         assert!(text.contains("7秒"));
         assert!(!text.contains("raw English"));
         s.shutdown_countdown_seconds = None;
-        assert!(screen(&s, &Interaction::default(), "")
+        assert!(render(&s, &Interaction::default(), "")
             .unwrap()
             .contains("自動では切れません"));
     }

@@ -30,6 +30,7 @@ impl EncodedFrame {
 struct State {
     frames: VecDeque<EncodedFrame>,
     bytes: u64,
+    encoded_bytes: u64,
     done: bool,
     error: Option<Error>,
 }
@@ -42,6 +43,7 @@ struct Queue {
     active_tasks: AtomicU64,
     resume_epoch: AtomicU64,
     budget: u64,
+    storage: Option<Arc<storage::Shared>>,
 }
 struct StopOnDrop<'a>(&'a Queue);
 impl Drop for StopOnDrop<'_> {
@@ -65,6 +67,7 @@ impl Queue {
             active_tasks: AtomicU64::new(0),
             resume_epoch: AtomicU64::new(0),
             budget,
+            storage: None,
         }
     }
     fn push(&self, frame: EncodedFrame, control: &dyn ExecutionControl) -> Result<()> {
@@ -94,6 +97,10 @@ impl Queue {
             "writer stopped",
         )?;
         state.bytes += cost;
+        state.encoded_bytes += format::FRAME_HEADER as u64 + frame.encoded.payload.len() as u64;
+        if let Some(s) = &self.storage {
+            s.queue_bytes.store(state.encoded_bytes, Ordering::Relaxed);
+        }
         state.frames.push_back(frame);
         self.wake.notify_all();
         Ok(())
@@ -112,6 +119,10 @@ impl Queue {
         }
         if let Some(frame) = state.frames.pop_front() {
             state.bytes -= frame.cost();
+            state.encoded_bytes -= format::FRAME_HEADER as u64 + frame.encoded.payload.len() as u64;
+            if let Some(s) = &self.storage {
+                s.queue_bytes.store(state.encoded_bytes, Ordering::Relaxed);
+            }
             self.wake.notify_all();
             return Ok(Received::Frame(frame));
         }
@@ -266,7 +277,8 @@ fn produce(
                                     error
                                 })?;
                                 let read_seconds = start.elapsed().as_secs_f64();
-                                queue.read.fetch_add(length,Ordering::Relaxed);
+                                let read=queue.read.fetch_add(length,Ordering::Relaxed)+length;
+                                if let Some(s)=&queue.storage {s.source_read.store(read,Ordering::Relaxed);}
                                 hooks.at("codec_encode")?;
                                 let start =
                                     crate::online::cpu_seconds(libc::CLOCK_THREAD_CPUTIME_ID);
@@ -374,6 +386,7 @@ fn produce(
                             .verification_service(observed.verify_bytes, observed.verify_seconds);
                         if let Some(reason) = feedback.observe(&ready.observation, observed.backlog)
                         {
+                            if plan.segmented_storage {feedback.verifiers=1;}
                             control.configure_verification_workers(feedback.verifiers);
                             gate.set(feedback.active.workers);
                             events.settings(
@@ -446,6 +459,7 @@ pub(super) fn copy(
     report: &mut Reporter<'_>,
     pool: &CpuPool,
     verification: &mut crate::inline_verify::Inline,
+    storage: &Arc<storage::Shared>,
 ) -> Result<()> {
     let mut producer_plan = plan.clone();
     while producer_plan.workers > 1
@@ -454,8 +468,8 @@ pub(super) fn copy(
     {
         producer_plan.workers -= 1;
     }
-    let base_memory = producer_plan.memory_bound()
-        + u64::from(control.verification_workers()) * ((128 << 20) + 2 * plan.range_bytes);
+    let base_memory =
+        crate::profiles::processing_workspace(&producer_plan, control.verification_workers());
     let budget = crate::profiles::queue_budget(&producer_plan, control.verification_workers());
     require(
         budget >= 2 * plan.range_bytes + 8192
@@ -463,7 +477,10 @@ pub(super) fn copy(
         "MEMORY_BUDGET",
         "productive queue plus encoders/checking exceeds RAM",
     )?;
-    let queue = Queue::new(budget, report.read);
+    let mut queue = Queue::new(budget, report.read);
+    if plan.segmented_storage {
+        queue.storage = Some(storage.clone());
+    }
     let writer = Mutex::new(WriteFeedback {
         seconds_per_stored: 1.0 / 100e6,
         backlog: 0,
@@ -542,6 +559,13 @@ pub(super) fn copy(
                     }
                     continue;
                 }
+                if plan.segmented_storage {
+                    for f in open.iter_mut().flatten() {
+                        if f.file.due() {
+                            checkpoint(f, journal, meta, plan, report, hooks)?;
+                        }
+                    }
+                }
                 space.poll(root)?;
                 let frame = match queue.take()? {
                     Received::Done => break,
@@ -572,8 +596,11 @@ pub(super) fn copy(
                         id,
                         report,
                         hooks,
+                        storage,
                     )?;
-                    verification.submit(entry, report, control)?;
+                    if !plan.segmented_storage {
+                        verification.submit(entry, report, control)?;
+                    }
                 }
                 if open[region].is_none() {
                     open[region] = Some(new_file(
@@ -587,6 +614,7 @@ pub(super) fn copy(
                         id,
                         report,
                         hooks,
+                        storage,
                     )?);
                 }
                 let f = open[region].as_mut().unwrap();
@@ -596,10 +624,13 @@ pub(super) fn copy(
                     "INVALID_STATE",
                     "productive extent or file bound",
                 )?;
+                if plan.segmented_storage {
+                    storage.input(record_bytes);
+                }
                 hooks.at("before_data_write")?;
                 hooks.at("destination_space_check")?;
                 crate::destination_space::check(root)?;
-                io::write_all(
+                storage::write_all(
                     &mut f.file,
                     &format::Frame {
                         codec: frame.encoded.codec,
@@ -609,7 +640,7 @@ pub(super) fn copy(
                     }
                     .encode(plan.format_version),
                 )?;
-                io::write_all(&mut f.file, &frame.encoded.payload)?;
+                storage::write_all(&mut f.file, &frame.encoded.payload)?;
                 f.raw += frame.raw_bytes;
                 f.frames += 1;
                 f.end += record_bytes;
@@ -620,7 +651,9 @@ pub(super) fn copy(
                 ));
                 report.stored += record_bytes;
                 hooks.at("after_data_write")?;
-                if f.frames % u64::from(plan.checkpoint_records) == 0 {
+                if (!plan.segmented_storage && f.frames % u64::from(plan.checkpoint_records) == 0)
+                    || f.file.due()
+                {
                     checkpoint(f, journal, meta, plan, report, hooks)?;
                 }
                 next[region] += 1;
@@ -634,8 +667,11 @@ pub(super) fn copy(
                         id,
                         report,
                         hooks,
+                        storage,
                     )?;
-                    verification.submit(entry, report, control)?;
+                    if !plan.segmented_storage {
+                        verification.submit(entry, report, control)?;
+                    }
                 }
                 cost_seconds += started.elapsed().as_secs_f64();
                 cost_bytes += record_bytes;
@@ -645,7 +681,11 @@ pub(super) fn copy(
                     cost_seconds = 0.0;
                     cost_bytes = 0;
                 }
-                feedback.backlog = report.durable.saturating_sub(report.verified);
+                feedback.backlog = if plan.segmented_storage {
+                    0
+                } else {
+                    report.durable.saturating_sub(report.verified)
+                };
                 (feedback.verify_bytes, feedback.verify_seconds) = verification.service();
             }
             Ok(())

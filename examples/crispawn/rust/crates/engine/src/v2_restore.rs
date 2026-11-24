@@ -79,6 +79,19 @@ pub(crate) fn restore(
                 "target aliases archive member",
             )?;
         }
+        if plan.segmented_storage {
+            for entry in &verified.files {
+                for path in crate::storage::DataFile::read(&root.join(&entry.relative_path), true)?
+                    .member_paths()?
+                {
+                    require(
+                        !io::same_file(&file, &io::open_regular(&path, false)?)?,
+                        "TARGET_IS_ARCHIVE",
+                        "restore target aliases a compressed storage part",
+                    )?;
+                }
+            }
+        }
         file
     } else {
         let file = io::create_new(target)?;
@@ -151,6 +164,7 @@ pub(crate) fn restore(
     report.emit("COMPLETE", "RESTORE_VERIFIED");
     let mut result = verified.report();
     result.operation = "restore".into();
+    result.verification_kind = "buffered_reopen".into();
     result.restored_ranges_verified = true;
     Ok(result)
 }

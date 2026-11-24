@@ -45,6 +45,8 @@ pub struct FileEntry {
     pub raw_blake3: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression_profiles: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_descriptor_blake3: Option<String>,
 }
 pub const FILE_COLUMNS: [&str; 7] = [
     "file_id",
@@ -66,6 +68,17 @@ pub const V3_COLUMNS: [&str; 8] = [
     "compression_profiles",
 ];
 const INDEX_FILES: [&str; 3] = ["files.csv", "metadata.json", "plan.json"];
+pub const SEGMENTED_COLUMNS: [&str; 9] = [
+    "file_id",
+    "relative_path",
+    "source_offset_bytes",
+    "source_length_bytes",
+    "stored_bytes",
+    "frame_count",
+    "raw_blake3",
+    "compression_profiles",
+    "storage_descriptor_blake3",
+];
 
 pub fn is_v2(root: &Path) -> Result<bool> {
     let meta: Metadata = io::read_json(&root.join("metadata.json"))?;
@@ -137,6 +150,14 @@ pub(crate) fn check_entry(entry: &FileEntry, meta: &Metadata, plan: &Plan) -> Re
     )?;
     types::unhex::<32>(&entry.raw_blake3)?;
     require(
+        entry.storage_descriptor_blake3.is_some() == plan.segmented_storage,
+        "INVALID_INDEX",
+        "storage layout and descriptor hash",
+    )?;
+    if let Some(hash) = &entry.storage_descriptor_blake3 {
+        types::unhex::<32>(hash)?;
+    }
+    require(
         if plan.format_version == 3 {
             entry
                 .compression_profiles
@@ -163,7 +184,8 @@ pub(crate) fn scan_file(
     mut visit: impl FnMut(u64, &[u8]) -> Result<()>,
 ) -> Result<()> {
     check_entry(entry, meta, plan)?;
-    let file = io::open_regular(&root.join(&entry.relative_path), false)?;
+    let file =
+        crate::storage::DataFile::read(&root.join(&entry.relative_path), plan.segmented_storage)?;
     require(
         file.metadata()?.len() == entry.stored_bytes,
         "FILE_CHANGED",
@@ -178,6 +200,9 @@ pub(crate) fn scan_file(
         entry.file_id,
         entry.source_offset_bytes,
     )?;
+    if let Some(h) = &entry.storage_descriptor_blake3 {
+        file.check_descriptor(h)?;
+    }
     let end = entry.stored_bytes - format::FOOTER as u64;
     let mut position = format::FILE_HEADER as u64;
     let mut raw_length = 0u64;
@@ -290,6 +315,11 @@ pub(crate) fn write_indices(root: &Path, entries: &[FileEntry]) -> Result<()> {
             .write_record(
                 if entries
                     .first()
+                    .is_some_and(|e| e.storage_descriptor_blake3.is_some())
+                {
+                    SEGMENTED_COLUMNS.as_slice()
+                } else if entries
+                    .first()
                     .is_some_and(|e| e.compression_profiles.is_some())
                 {
                     V3_COLUMNS.as_slice()
@@ -328,7 +358,13 @@ pub(crate) fn write_commit(root: &Path, id: &str) -> Result<()> {
             format_version: io::read_json::<Metadata>(&root.join("metadata.json"))?.format_version,
             backup_id: id.into(),
             hashes,
-            verification_kind: "buffered_reopen".into(),
+            verification_kind: if io::read_json::<Plan>(&root.join("plan.json"))?.segmented_storage
+            {
+                "compressed_blake3"
+            } else {
+                "buffered_reopen"
+            }
+            .into(),
         })?,
     )
 }
@@ -350,7 +386,12 @@ impl Verified {
                 .range_count(self.metadata.source.bytes)
                 .to_string(),
             file_count: self.files.len().to_string(),
-            verification_kind: "buffered_reopen".into(),
+            verification_kind: if self.plan.segmented_storage {
+                "compressed_blake3"
+            } else {
+                "buffered_reopen"
+            }
+            .into(),
             dataset_committed: true,
             restored_ranges_verified: false,
         }
@@ -370,17 +411,26 @@ pub(crate) fn inspect(
         id,
         files,
     } = &verified;
+    if plan.segmented_storage {
+        report.verification_kind = "compressed_blake3";
+    }
     report.verified = 0;
     report.verification_read = 0;
     report.stored = 0;
     report.emit("VERIFYING", "VERIFY_STARTED");
     for entry in files {
-        scan_file(root, entry, metadata, plan, *id, pool, |_, raw| {
-            report.gate(control, "VERIFYING")?;
-            report.verification_read += raw.len() as u64;
-            report.emit("VERIFYING", "FILE_HASH_PROGRESS");
-            Ok(())
-        })?;
+        if plan.segmented_storage {
+            let data = crate::storage::DataFile::read(&root.join(&entry.relative_path), true)?;
+            data.check_descriptor(entry.storage_descriptor_blake3.as_ref().unwrap())?;
+            data.verify_parts_with_pool(None, control, pool)?;
+        } else {
+            scan_file(root, entry, metadata, plan, *id, pool, |_, raw| {
+                report.gate(control, "VERIFYING")?;
+                report.verification_read += raw.len() as u64;
+                report.emit("VERIFYING", "FILE_HASH_PROGRESS");
+                Ok(())
+            })?;
+        }
         report.verified += entry.source_length_bytes;
         report.stored += entry.stored_bytes;
         report.emit("VERIFYING", "FILE_VERIFIED");
@@ -415,7 +465,12 @@ pub(crate) fn manifest(
             commit.format_version == metadata.format_version
                 && commit.backup_id == metadata.backup_id
                 && commit.hashes == expected
-                && commit.verification_kind == "buffered_reopen",
+                && commit.verification_kind
+                    == if plan.segmented_storage {
+                        "compressed_blake3"
+                    } else {
+                        "buffered_reopen"
+                    },
             "COMMIT_MISMATCH",
             "v2 commit identity or metadata",
         )?;
@@ -430,7 +485,9 @@ pub(crate) fn manifest(
     )?;
     let mut rows = CsvRows::<FileEntry>::open(
         &root.join("files.csv"),
-        if plan.format_version == 3 {
+        if plan.segmented_storage {
+            &SEGMENTED_COLUMNS
+        } else if plan.format_version == 3 {
             &V3_COLUMNS
         } else {
             &FILE_COLUMNS
@@ -459,10 +516,13 @@ pub(crate) fn manifest(
     let actual = fs::read_dir(root.join("data"))?
         .map(|e| e.map(|x| x.file_name()))
         .collect::<std::io::Result<BTreeSet<_>>>()?;
-    let expected = files
+    let mut expected: BTreeSet<_> = files
         .iter()
         .map(|e| Path::new(&e.relative_path).file_name().unwrap().to_owned())
         .collect();
+    if plan.segmented_storage {
+        expected.insert(std::ffi::OsString::from("segments"));
+    }
     require(
         actual == expected,
         "UNREFERENCED_DATA",

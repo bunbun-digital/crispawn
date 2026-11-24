@@ -1,5 +1,10 @@
 # Copy pipeline and failure records
 
+Automatic plans now use [segmented compressed storage](SEGMENTED-STORAGE.md).
+The producer and queue described here remain; physical part confirmation replaces
+sealed-file decompression for those plans. Legacy contiguous plans retain the
+sealed-file checking path described below.
+
 The productive v3 path separates source reads, compression and BLAKE3 from
 destination writes, checkpoints and concurrent verification:
 

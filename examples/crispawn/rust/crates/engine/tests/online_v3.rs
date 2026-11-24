@@ -18,6 +18,7 @@ use std::{
 
 fn plan() -> Plan {
     Plan {
+        segmented_storage: false,
         format_version: 3,
         range_bytes: 64 << 10,
         read_bytes: 64 << 10,

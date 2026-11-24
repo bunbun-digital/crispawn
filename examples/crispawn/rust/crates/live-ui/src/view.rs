@@ -168,6 +168,7 @@ pub struct View<'a> {
     logs: Widget<'a>,
     percent: Widget<'a>,
     eta: Widget<'a>,
+    elapsed: Widget<'a>,
     overall: Widget<'a>,
     total: Widget<'a>,
     overall_bar: Widget<'a>,
@@ -283,6 +284,8 @@ impl<'a> View<'a> {
         let overall = d.label(progress, 0, 0, 600, 20, 14, MUTED)?;
         let eta = d.label(progress, 668, 8, 300, 57, 19, INK)?;
         eta.style(TextRight, Main)?;
+        let elapsed = d.label(progress, 360, 8, 280, 57, 19, INK)?;
+        elapsed.style(TextRight, Main)?;
         let overall_bar = d.bar(progress, 0, 66, 968, 8, BLUE)?;
         let total = d.label(progress, 0, 81, 968, 46, 12, MUTED)?;
         let read = d.label(progress, 0, 123, 968, 23, 13, MUTED)?;
@@ -292,7 +295,7 @@ impl<'a> View<'a> {
         let confirmed = d.label(progress, 0, 219, 968, 24, 14, INK)?;
         let confirmed_bar = d.bar(progress, 0, 248, 968, 5, GREEN)?;
         let confirmed_exact = d.label(progress, 0, 257, 968, 25, 12, INK)?;
-        let tail = d.label(progress, 0, 297, 968, 58, 16, GREEN)?;
+        let tail = d.label(progress, 0, 297, 968, 63, 12, INK)?;
         d.box_(progress, 990, 0, 1, 325, Some(LINE))?;
         let queue = d.label(progress, 1007, 4, 229, 111, 12, MUTED)?;
         let mut settings_fields = Vec::new();
@@ -394,6 +397,7 @@ impl<'a> View<'a> {
             logs,
             percent,
             eta,
+            elapsed,
             overall,
             total,
             overall_bar,
@@ -565,6 +569,19 @@ impl<'a> View<'a> {
             .map(|n| format!("{}:{:02}:{:02}", n / 3600, n / 60 % 60, n % 60))
             .unwrap_or_else(|| l.text(T::Estimating).into());
         self.eta.text(&format!("{}\n{eta}", l.text(T::Eta)))?;
+        let seconds = if mode == Mode::Backup {
+            s.storage.as_ref().map(|v| v.elapsed_seconds)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| snap.map(|v| v.elapsed_seconds.max(0.0) as u64).unwrap_or(0));
+        self.elapsed.text(&format!(
+            "{}\n{:02}:{:02}:{:02}",
+            l.text(T::Elapsed),
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        ))?;
         let selected = v.disks.iter().filter(|d| d.selected).count().max(1);
         self.total.text(&format!(
             "{}\n{}: {} · {}",
@@ -741,16 +758,39 @@ impl<'a> View<'a> {
             model::capacity(v.destination_free_bytes)
         );
         self.destination.text(&destination)?;
-        self.tail
-            .text(if durable == current_total && verified < current_total {
-                l.text(if mode == Mode::Backup {
-                    T::CopyTail
-                } else {
-                    T::RestoreTail
-                })
+        if mode == Mode::Backup {
+            if let Some(st) = &s.storage {
+                self.confirmed.text(&format!(
+                    "{}    {}% · {} / {}",
+                    l.text(T::StorageConfirmed),
+                    percentage(st.confirmed_bytes, st.written_bytes),
+                    model::capacity(st.confirmed_bytes),
+                    model::capacity(st.written_bytes)
+                ))?;
+                self.confirmed_exact.text(&format!(
+                    "{} / {}",
+                    model::exact(st.confirmed_bytes),
+                    model::exact(st.written_bytes)
+                ))?;
+                self.confirmed_bar
+                    .bar(1000, ratio(st.confirmed_bytes, st.written_bytes))?;
+                self.tail.text(&l.storage_summary(st))?;
             } else {
-                ""
-            })?;
+                self.tail
+                    .text(if durable == current_total && verified < current_total {
+                        l.text(T::CopyTail)
+                    } else {
+                        ""
+                    })?;
+            }
+        } else {
+            self.tail
+                .text(if durable == current_total && verified < current_total {
+                    l.text(T::RestoreTail)
+                } else {
+                    ""
+                })?;
+        }
         self.choices(v, s, input, l, &destination)?;
         self.finish_title.text(l.text(if page == Page::Failed {
             T::Failure

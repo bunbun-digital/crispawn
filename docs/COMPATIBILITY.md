@@ -27,6 +27,15 @@ Changing Builder-facing paths requires a coordinated integration update.
 The archive layout, binary format, BLAKE3 range hashes, diagnostic probe markers
 and kernel boot parameters are preserved by the source naming cleanup.
 
+## Segmented backup storage
+
+Automatic-copy plans now select a versioned segmented layout. This is a stored
+archive extension, not a change to the Builder boot-media/configuration interface.
+New readers support existing contiguous backups. Older ISOs reject the new plan
+field; use this ISO or a compatible newer release to restore segmented backups.
+The layout, original-data and stored-data hashes, limits and progress units are
+specified in [Segmented compressed storage](SEGMENTED-STORAGE.md).
+
 ## USB media layout v2
 
 The ISO contains `/boot/crispawn-media.json` with exactly these five fields:

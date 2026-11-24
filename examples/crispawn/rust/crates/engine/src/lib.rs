@@ -27,6 +27,7 @@ pub mod presentation;
 pub mod probe;
 pub mod profiles;
 pub mod restore;
+mod storage;
 pub mod supervisor;
 pub mod terminal;
 mod uefi_diagnostics;
@@ -61,6 +62,7 @@ pub(crate) struct Reporter<'a> {
     pub verified: u64,
     pub verification_read: u64,
     pub stored: u64,
+    pub verification_kind: &'static str,
     paused: std::time::Duration,
 }
 impl<'a> Reporter<'a> {
@@ -76,6 +78,7 @@ impl<'a> Reporter<'a> {
             verified: 0,
             verification_read: 0,
             stored: 0,
+            verification_kind: "buffered_reopen",
             paused: std::time::Duration::ZERO,
         }
     }
@@ -99,7 +102,7 @@ impl<'a> Reporter<'a> {
                 .saturating_sub(self.paused)
                 .as_secs_f64(),
             eta_seconds: None,
-            verification_kind: "buffered_reopen".into(),
+            verification_kind: self.verification_kind.into(),
         });
         self.seq += 1;
     }

@@ -218,6 +218,10 @@ pub(crate) fn child() -> Result<()> {
             ) {
                 if status.job_id == request.target.job_id {
                     record.insert(
+                        "storage".into(),
+                        serde_json::to_value(&status.storage).unwrap_or(serde_json::Value::Null),
+                    );
+                    record.insert(
                         "progress".into(),
                         serde_json::to_value(status.snapshot)
                             .map_err(|e| Error::new("JSON_ERROR", e.to_string()))?,

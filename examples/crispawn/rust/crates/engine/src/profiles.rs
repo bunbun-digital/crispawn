@@ -19,8 +19,13 @@ pub fn memory_bound(plan: &Plan, verifiers: u32) -> u64 {
     processing_workspace(plan, verifiers) + queue_budget(plan, verifiers)
 }
 
-fn processing_workspace(plan: &Plan, verifiers: u32) -> u64 {
-    plan.memory_bound() + u64::from(verifiers) * ((128 << 20) + 2 * plan.range_bytes)
+pub(crate) fn processing_workspace(plan: &Plan, verifiers: u32) -> u64 {
+    plan.memory_bound()
+        + if plan.segmented_storage {
+            0
+        } else {
+            u64::from(verifiers) * ((128 << 20) + 2 * plan.range_bytes)
+        }
 }
 
 pub(crate) fn queue_budget(plan: &Plan, verifiers: u32) -> u64 {
@@ -54,12 +59,13 @@ pub fn select(
     require(cpus > 0, "INVALID_RESOURCES", "no CPU allocation")?;
     let mut plan = template.clone();
     plan.format_version = 3;
+    plan.segmented_storage = true;
     plan.read_bytes = 1 << 20;
     plan.range_bytes = 16 << 20;
     plan.container_bytes = plan.container_bytes.max(plan.range_bytes + 352);
     plan.memory_limit_bytes = memory_bytes.min(template.memory_limit_bytes);
     plan.workers = cpus.saturating_mul(2).min(8);
-    let mut verifiers = cpus.div_ceil(2).clamp(1, 16);
+    let mut verifiers = 1;
     (plan.codec, plan.compression_level) = match profile {
         Profile::Balanced => (Codec::Zstd, 3),
         Profile::LongMatches => (Codec::Zstd, 6),
@@ -164,7 +170,7 @@ mod tests {
                     let (plan, verify) =
                         select(&template, profile, cpus, memory << 30, 1 << 40).unwrap();
                     assert_eq!(plan.workers, expected);
-                    assert_eq!(verify, cpus / 2);
+                    assert_eq!(verify, 1);
                     assert_eq!(plan.read_bytes, 1 << 20);
                     assert_eq!(plan.range_bytes, 16 << 20);
                     assert!(memory_bound(&plan, verify) <= plan.memory_limit_bytes);

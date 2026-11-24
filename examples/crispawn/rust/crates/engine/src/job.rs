@@ -62,6 +62,10 @@ pub enum JobEvent {
         queued_encoded_bytes: String,
         queue_budget_bytes: String,
     },
+    StorageProgress {
+        backup_id: String,
+        status: crispawn_core::live::StorageStatus,
+    },
     Finished {
         success: bool,
         code: String,
@@ -802,6 +806,12 @@ impl Controller {
     }
 }
 impl EventSink for Controller {
+    fn storage_progress(&self, backup_id: &str, status: &crispawn_core::live::StorageStatus) {
+        self.events.emit(JobEvent::StorageProgress {
+            backup_id: backup_id.into(),
+            status: status.clone(),
+        });
+    }
     fn prefetch(&self, backup_id: &str, read: u64, queued: u64, budget: u64) {
         self.events.emit(JobEvent::ReadAhead {
             backup_id: backup_id.into(),

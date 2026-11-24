@@ -332,9 +332,37 @@ impl Persistent {
 }
 impl JobEvents for Diagnostics {
     fn emit(&self, event: JobEvent) {
+        let mut persist_storage = false;
         {
             let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
             match &event {
+                JobEvent::StorageProgress { backup_id, status } => {
+                    if s.snapshot
+                        .as_ref()
+                        .is_some_and(|v| v.backup_id == *backup_id)
+                    {
+                        persist_storage = s
+                            .storage
+                            .as_ref()
+                            .map(|old| {
+                                old.written_blocks != status.written_blocks
+                                    || old.confirmed_blocks != status.confirmed_blocks
+                                    || old.calibrated != status.calibrated
+                                    || (old.phase == status.phase
+                                        && old.phase_elapsed_ms / 5000
+                                            != status.phase_elapsed_ms / 5000)
+                            })
+                            .unwrap_or(true);
+                        if s.storage
+                            .as_ref()
+                            .map(|old| (old.written_bytes, old.confirmed_bytes))
+                            != Some((status.written_bytes, status.confirmed_bytes))
+                        {
+                            self.last_progress.store(self.ms(), Ordering::Relaxed);
+                        }
+                        s.storage = Some(status.clone());
+                    }
+                }
                 JobEvent::State { phase } => s.phase = phase.clone(),
                 JobEvent::PlanSelected {
                     plan,
@@ -371,6 +399,12 @@ impl JobEvents for Diagnostics {
                         snapshot.verification_read_raw_bytes,
                     )) {
                         self.last_progress.store(self.ms(), Ordering::Relaxed);
+                    }
+                    if s.snapshot
+                        .as_ref()
+                        .is_some_and(|old| old.backup_id != snapshot.backup_id)
+                    {
+                        s.storage = None;
                     }
                     let mut current = snapshot.clone();
                     if let Some(previous) = s
@@ -445,7 +479,9 @@ impl JobEvents for Diagnostics {
         }
         // Read-ahead is live RAM telemetry, not a new durable checkpoint. Do
         // not add one USB fsync per sample while diagnosing a slow writer.
-        if matches!(event, JobEvent::ReadAhead { .. }) {
+        if matches!(event, JobEvent::ReadAhead { .. })
+            || (matches!(event, JobEvent::StorageProgress { .. }) && !persist_storage)
+        {
             return;
         }
         self.record(

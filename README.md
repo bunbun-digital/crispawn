@@ -106,7 +106,11 @@ the expected path. See [the USB file layout specification](docs/COMPATIBILITY.md
    compressed size depends on the actual bytes, not the filesystem's used-space count.
 4. **Progress and control:** the UI shows percent, bytes and GB, ETA, read size,
    compression/level and concurrency. Pause/resume is available; cancellation
-   requires confirmation. Saved data is checked while copying continues.
+   requires confirmation. The first stored part measures destination service speed
+   and sets a baseline file size toward a soft five-second target. The UI also
+   shows queued write blocks, current file MB, writer concurrency and read/write MB/s.
+   Each stored part is reread and checked by compressed-byte BLAKE3 while copying
+   continues; backup confirmation does not decompress the data.
 5. **Restore:** a saved date/session, source disk from that set and destination
    disk are selected and confirmed. The target must fit the original disk's byte
    length. Restoring overwrites the selected target and checks restored ranges
@@ -164,15 +168,17 @@ crispawn/
   work/       Temporary operation data
 ```
 
-Each archive contains compressed data files plus `metadata.json`, `files.csv`
-and completion/integrity records. Each data file covers one contiguous source
-range; source lengths vary to keep stored file sizes roughly similar.
-Every data file is limited to **2,000,000,000 bytes**; final partial files may be smaller.
-`files.csv` records the relative filename, `source_offset_bytes`,
-`source_length_bytes`, `stored_bytes`, `raw_blake3` and compression profiles.
-The BLAKE3 value applies to the **uncompressed original range**, one per data
-file, and is used for copy/restore checks. A whole-disk hash is not required.
-The archive and metadata together constitute the saved copy.
+Each backup contains compressed part files, their ordering/position metadata,
+`metadata.json`, `files.csv`, and completion/integrity records. Storage files can
+split a compression frame, so keep the complete backup together for restore.
+The first file's measured service time determines the baseline part size; tails
+can be smaller. Every physical file remains below **2,000,000,000 bytes**.
+
+Stored parts are checked against BLAKE3 calculated from the compressed bytes
+before writing. The original-range BLAKE3 is retained separately for restored
+output checks. Copy confirmation does not decompress the saved data. A single
+whole-disk hash is not required. Older contiguous backups remain readable.
+Restore newly segmented backups with this or a compatible newer ISO.
 
 ## Build and release information
 
