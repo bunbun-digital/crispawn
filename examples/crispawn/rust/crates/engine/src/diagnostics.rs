@@ -371,6 +371,9 @@ impl JobEvents for Diagnostics {
                         .as_ref()
                         .is_some_and(|v| v.backup_id == *backup_id)
                     {
+                        let memory = s.memory.get_or_insert_with(Default::default);
+                        memory.encoded_queue_bytes = status.prefetch_encoded_bytes;
+                        memory.encoded_queue_limit_bytes = status.prefetch_limit_bytes;
                         persist_storage = s
                             .storage
                             .as_ref()
@@ -460,8 +463,7 @@ impl JobEvents for Diagnostics {
                 JobEvent::ReadAhead {
                     backup_id,
                     read_raw_bytes,
-                    queued_encoded_bytes,
-                    queue_budget_bytes,
+                    ..
                 } => {
                     if let Some(snapshot) = s
                         .snapshot
@@ -473,14 +475,6 @@ impl JobEvents for Diagnostics {
                                 snapshot.read_raw_bytes = read;
                                 self.last_progress.store(self.ms(), Ordering::Relaxed);
                             }
-                        }
-                        if let (Ok(bytes), Ok(limit)) = (
-                            queued_encoded_bytes.parse::<u64>(),
-                            queue_budget_bytes.parse::<u64>(),
-                        ) {
-                            let memory = s.memory.get_or_insert_with(Default::default);
-                            memory.encoded_queue_bytes = bytes;
-                            memory.encoded_queue_limit_bytes = limit;
                         }
                     }
                 }

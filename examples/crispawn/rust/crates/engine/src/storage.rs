@@ -151,6 +151,8 @@ impl Shared {
                     confirmed_blocks: 0,
                     waiting_blocks: 0,
                     queued_encoded_bytes: 0,
+                    prefetch_encoded_bytes: 0,
+                    prefetch_limit_bytes: 0,
                     current_file_bytes: 0,
                     baseline_bytes: FIRST,
                     write_workers: crate::storage_worker::WORKERS,
@@ -249,6 +251,13 @@ impl Shared {
     pub fn input(&self, bytes: u64) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).input = bytes;
     }
+    pub fn prefetch_limit(&self, bytes: u64) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .status
+            .prefetch_limit_bytes = bytes;
+    }
     pub fn set_write_verification(&self, enabled: bool) {
         self.verify_after_write.store(enabled, Ordering::Relaxed);
     }
@@ -304,6 +313,7 @@ impl Shared {
     pub fn snapshot(&self) -> StorageStatus {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut v = s.status.clone();
+        v.prefetch_encoded_bytes = self.queue_bytes.load(Ordering::Relaxed);
         v.elapsed_seconds = self.started.elapsed().as_secs();
         v.phase_elapsed_ms = s
             .phase_since

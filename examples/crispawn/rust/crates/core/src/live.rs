@@ -35,6 +35,10 @@ pub struct StorageStatus {
     pub confirmed_blocks: u64,
     pub waiting_blocks: u64,
     pub queued_encoded_bytes: u64,
+    #[serde(default)]
+    pub prefetch_encoded_bytes: u64,
+    #[serde(default)]
+    pub prefetch_limit_bytes: u64,
     pub current_file_bytes: u64,
     pub baseline_bytes: u64,
     pub write_workers: u32,

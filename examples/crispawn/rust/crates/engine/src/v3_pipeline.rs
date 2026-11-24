@@ -487,6 +487,7 @@ pub(super) fn copy(
     )?;
     let mut queue = Queue::new(budget, report.read);
     if plan.segmented_storage {
+        storage.prefetch_limit(budget);
         queue.storage = Some(storage.clone());
     }
     let writer = Mutex::new(WriteFeedback {
@@ -737,10 +738,14 @@ mod tests {
     #[test]
     fn queue_charges_compressed_capacity_and_hash_state_and_bounds_backpressure() {
         let cost = frame().cost();
-        let queue = Queue::new(cost, 0);
+        let mut queue = Queue::new(cost, 0);
+        let storage = storage::Shared::new(&"a".repeat(32), 1).unwrap();
+        storage.prefetch_limit(cost);
+        queue.storage = Some(storage.clone());
         let cancel = AtomicBool::new(false);
         queue.push(frame(), &cancel).unwrap();
         assert_eq!(queue.state.lock().unwrap().bytes, cost);
+        assert!(storage.snapshot().prefetch_encoded_bytes > 0);
         assert!(cost < (16 << 20));
         let finished = AtomicBool::new(false);
         std::thread::scope(|scope| {
@@ -757,6 +762,9 @@ mod tests {
             child.join().unwrap();
             assert_eq!(queue.state.lock().unwrap().bytes, cost);
         });
+        assert!(matches!(queue.take().unwrap(), Received::Frame(_)));
+        assert_eq!(storage.snapshot().prefetch_encoded_bytes, 0);
+        assert_eq!(storage.snapshot().prefetch_limit_bytes, cost);
     }
     #[test]
     fn stopping_writer_releases_a_full_compressed_queue() {
