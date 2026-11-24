@@ -56,6 +56,12 @@ pub enum JobEvent {
         eta_seconds: Option<u64>,
         phase: String,
     },
+    ReadAhead {
+        backup_id: String,
+        read_raw_bytes: String,
+        queued_encoded_bytes: String,
+        queue_budget_bytes: String,
+    },
     Finished {
         success: bool,
         code: String,
@@ -796,6 +802,14 @@ impl Controller {
     }
 }
 impl EventSink for Controller {
+    fn prefetch(&self, backup_id: &str, read: u64, queued: u64, budget: u64) {
+        self.events.emit(JobEvent::ReadAhead {
+            backup_id: backup_id.into(),
+            read_raw_bytes: read.to_string(),
+            queued_encoded_bytes: queued.to_string(),
+            queue_budget_bytes: budget.to_string(),
+        });
+    }
     fn settings(&self, plan: &Plan, verify_workers: u32, total: u64, reason: &str) {
         self.events.emit(JobEvent::PlanSelected {
             plan: plan.clone(),

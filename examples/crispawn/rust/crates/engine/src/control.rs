@@ -3,7 +3,7 @@
 //! Cooperative controls. A request is not an acknowledgement of quiescence.
 use crate::{Error, Result};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Condvar, Mutex,
 };
 use std::time::Duration;
@@ -31,6 +31,47 @@ pub trait ExecutionControl: Send + Sync {
 impl ExecutionControl for AtomicBool {
     fn cancelled(&self) -> bool {
         self.load(Ordering::Relaxed)
+    }
+}
+/// Mark active I/O and park at a pause boundary without claiming it is running.
+pub(crate) struct Activity<'a> {
+    counter: &'a AtomicU64,
+    counted: bool,
+}
+impl<'a> Activity<'a> {
+    pub fn new(counter: &'a AtomicU64) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self {
+            counter,
+            counted: true,
+        }
+    }
+    pub fn wait(&mut self, control: &dyn ExecutionControl, stop: &AtomicBool) -> Result<bool> {
+        let mut waited = false;
+        loop {
+            control.check_cancel()?;
+            if stop.load(Ordering::Acquire) {
+                return Err(Error::new("CANCELLED", "activity stopped"));
+            }
+            if !self.counted {
+                self.counter.fetch_add(1, Ordering::AcqRel);
+                self.counted = true;
+            }
+            if !control.pause_requested() {
+                return Ok(waited);
+            }
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+            self.counted = false;
+            waited = true;
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+impl Drop for Activity<'_> {
+    fn drop(&mut self) {
+        if self.counted {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 pub struct RunControl {

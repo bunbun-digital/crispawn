@@ -47,6 +47,11 @@ DVD/read-only boot media may provide RAM and screen diagnostics only. Failure to
 save is recorded; successful persistence is never inferred from a path alone.
 Normal NTFS copy logs remain at `crispawn/logs` on the data partition.
 
+For failures after a successful mount, including a supervisor-detected stalled
+worker, see [Copy pipeline and failure records](IO-PIPELINE.md). That path makes
+a separate bounded NTFS failure-file attempt without waiting for the ordinary
+log collector.
+
 `failure.action` still selects `stay` or delayed `poweroff`. This diagnostic does
 not change the configured failure/completion countdown or choose another disk.
 For a dirty drive, repair it in Windows and safely eject it before trying again.

@@ -18,9 +18,24 @@ struct Counters {
     requested: AtomicBool,
     reads: AtomicU64,
     writes: AtomicU64,
+    prefetch_target: Option<u64>,
 }
 impl Hooks for Counters {
     fn at(&self, point: &'static str) -> Result<()> {
+        if point == "before_data_sync" && !self.requested.load(Ordering::SeqCst) {
+            if let Some(target) = self.prefetch_target {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while self.reads.load(Ordering::SeqCst) < target {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(crispawn_engine::Error::new(
+                            "TEST_DEADLINE",
+                            "producer did not prefetch while writer was held",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
         if point == "source_read" {
             self.reads.fetch_add(1, Ordering::SeqCst);
         }
@@ -51,14 +66,22 @@ fn paused_copy(cancel: bool, format_version: u32) {
         container_bytes: 262144,
         workers: 4,
         checkpoint_records: 1,
+        memory_limit_bytes: if format_version == 3 {
+            1 << 30
+        } else {
+            512 << 20
+        },
         ..Plan::default()
     };
     let control = Arc::new(RunControl::new());
+    let prefetch_target =
+        (format_version == 3).then(|| plan.range_count(fs::metadata(&source).unwrap().len()));
     let hooks = Counters {
         control: control.clone(),
         requested: AtomicBool::new(false),
         reads: AtomicU64::new(0),
         writes: AtomicU64::new(0),
+        prefetch_target,
     };
     let (sender, receiver) = mpsc::channel();
     std::thread::scope(|scope| {
@@ -74,13 +97,24 @@ fn paused_copy(cancel: bool, format_version: u32) {
             )
         });
         let paused = loop {
-            let event = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+            let event = match receiver.recv_timeout(Duration::from_secs(10)) {
+                Ok(event) => event,
+                Err(error) => {
+                    control.cancel();
+                    panic!("pause acknowledgement failed: {error}");
+                }
+            };
             if event.code == "PAUSE_ACK" {
                 break event;
             }
         };
         assert_eq!(paused.phase, "PAUSED");
-        assert_eq!(paused.durable_raw_bytes, paused.read_raw_bytes);
+        if format_version == 3 {
+            assert_eq!(paused.read_raw_bytes, fs::metadata(&source).unwrap().len());
+            assert!(paused.durable_raw_bytes < paused.read_raw_bytes);
+        } else {
+            assert_eq!(paused.durable_raw_bytes, paused.read_raw_bytes);
+        }
         let counts = (
             hooks.reads.load(Ordering::SeqCst),
             hooks.writes.load(Ordering::SeqCst),
@@ -139,6 +173,14 @@ fn v2_pause_acknowledges_durable_quiescence_then_resume_completes() {
 #[test]
 fn v2_cancelled_pause_is_resumable_with_contiguous_file_hashes() {
     paused_copy(true, 2);
+}
+#[test]
+fn v3_pause_retains_compressed_prefetch_while_acknowledging_io_quiescence() {
+    paused_copy(false, 3);
+}
+#[test]
+fn v3_cancelled_pause_preserves_contiguous_hashes_and_resumes() {
+    paused_copy(true, 3);
 }
 #[test]
 fn verification_pause_and_cancellation_preserve_the_committed_archive() {

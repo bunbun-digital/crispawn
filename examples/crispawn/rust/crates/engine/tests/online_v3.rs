@@ -175,6 +175,134 @@ fn front_and_rear_region_order_has_no_gaps_duplicates_or_disk_sized_allocation()
 }
 
 #[test]
+fn productive_compression_continues_while_destination_checkpoint_is_waiting() {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
+    struct Overlap {
+        queued: AtomicUsize,
+        waiting: AtomicBool,
+        observed: AtomicBool,
+    }
+    impl Hooks for Overlap {
+        fn at(&self, point: &'static str) -> Result<()> {
+            if point == "before_data_sync" && !self.waiting.swap(true, Ordering::SeqCst) {
+                let before = self.queued.load(Ordering::SeqCst);
+                let end = Instant::now() + Duration::from_secs(5);
+                while self.queued.load(Ordering::SeqCst) < before + 3 && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                self.observed.store(
+                    self.queued.load(Ordering::SeqCst) >= before + 3,
+                    Ordering::SeqCst,
+                );
+            }
+            Ok(())
+        }
+        fn span(&self, point: &'static str, _offset: u64, _length: u64) -> Result<()> {
+            if point == "compressed_queued" && self.queued.fetch_add(1, Ordering::SeqCst) == 0 {
+                let end = Instant::now() + Duration::from_secs(5);
+                while !self.waiting.load(Ordering::SeqCst) && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    let raw = fixture();
+    fs::write(&source, &raw).unwrap();
+    let hook = Overlap {
+        queued: AtomicUsize::new(0),
+        waiting: AtomicBool::new(false),
+        observed: AtomicBool::new(false),
+    };
+    let mut p = plan();
+    p.checkpoint_records = 1;
+    let archive = dir.path().join("archive");
+    backup::backup(
+        &source,
+        &archive,
+        p,
+        dir.path(),
+        &NoEvents,
+        &hook,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        hook.observed.load(Ordering::SeqCst),
+        "producer stopped while destination waited for sync"
+    );
+    let target = dir.path().join("target");
+    restore::restore(&archive, &target, false, dir.path(), &NoEvents, &NoHooks).unwrap();
+    assert_eq!(fs::read(target).unwrap(), raw);
+}
+
+#[test]
+fn producer_and_destination_failures_release_v3_pipeline_without_commit() {
+    use std::time::{Duration, Instant};
+    struct Fail {
+        point: &'static str,
+        fired: AtomicBool,
+    }
+    impl Hooks for Fail {
+        fn at(&self, p: &'static str) -> Result<()> {
+            if p == self.point && !self.fired.swap(true, Ordering::SeqCst) {
+                Err(Error::new("INJECTED_IO_ERROR", "bounded pipeline failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    for point in [
+        "source_read",
+        "codec_encode",
+        "before_data_write",
+        "before_data_sync",
+        "after_checkpoint",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let raw = fixture();
+        fs::write(&source, &raw).unwrap();
+        let archive = dir.path().join("archive");
+        let start = Instant::now();
+        let error = backup::backup(
+            &source,
+            &archive,
+            plan(),
+            dir.path(),
+            &NoEvents,
+            &Fail {
+                point,
+                fired: AtomicBool::new(false),
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "INJECTED_IO_ERROR", "{point}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "pipeline failure did not drain: {point}"
+        );
+        assert!(!archive.join("COMMITTED").exists());
+        backup::resume(
+            &source,
+            &archive,
+            dir.path(),
+            &NoEvents,
+            &NoHooks,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let target = dir.path().join("target");
+        restore::restore(&archive, &target, false, dir.path(), &NoEvents, &NoHooks).unwrap();
+        assert_eq!(fs::read(target).unwrap(), raw);
+    }
+}
+
+#[test]
 fn runtime_parallelism_bounds_real_reads_not_just_the_result_queue() {
     use std::sync::atomic::AtomicUsize;
     struct Meter {

@@ -13,6 +13,7 @@ fn main() {
         }
     }
     let result = match args.as_slice() {
+        [mode] if mode == "persist-failure" => crispawn_engine::supervisor::persist_failure_child(),
         [mode, length, retries, delay] if mode == "inspect-ntfs" => {
             match (length.parse(), retries.parse(), delay.parse()) {
                 (Ok(length), Ok(retries), Ok(delay)) => crispawn_engine::live::inspect_ntfs_child(length, retries, delay),

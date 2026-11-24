@@ -16,7 +16,32 @@ pub enum Profile {
 }
 
 pub fn memory_bound(plan: &Plan, verifiers: u32) -> u64 {
+    processing_workspace(plan, verifiers) + queue_budget(plan, verifiers)
+}
+
+fn processing_workspace(plan: &Plan, verifiers: u32) -> u64 {
     plan.memory_bound() + u64::from(verifiers) * ((128 << 20) + 2 * plan.range_bytes)
+}
+
+pub(crate) fn queue_budget(plan: &Plan, verifiers: u32) -> u64 {
+    if plan.format_version != 3 {
+        return 0;
+    }
+    let minimum = 2 * plan.range_bytes + 8192;
+    // Reserve worst-case encoding, raw/reordering and decoding workspaces first.
+    // The queue grows lazily into remaining processing RAM; the OS reserve is separate.
+    plan.memory_limit_bytes
+        .saturating_sub(processing_workspace(plan, verifiers))
+        .clamp(minimum, 8 << 30)
+}
+
+pub(crate) fn live_memory_budget(configured: u64, available: u64, automatic_v2: bool) -> u64 {
+    let usable = available.saturating_sub(192 << 20);
+    if automatic_v2 {
+        usable / 4 * 3
+    } else {
+        configured.min(usable)
+    }
 }
 
 pub fn select(
@@ -104,6 +129,26 @@ pub fn available_memory() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_automatic_budget_scales_with_ram_and_retains_os_headroom() {
+        for gib in [4u64, 8, 16] {
+            let available = gib << 30;
+            let budget = live_memory_budget(4 << 30, available, true);
+            assert!(budget < available && available - budget >= available / 4);
+            let mut template = Plan::current();
+            template.memory_limit_bytes = budget;
+            let (mut p, v) = select(&template, Profile::Balanced, 8, budget, 1 << 40).unwrap();
+            crate::online::reserve(&mut p, 8, v).unwrap();
+            assert!(memory_bound(&p, v) <= budget);
+            assert!(queue_budget(&p, v) >= 2 * p.range_bytes + 8192);
+            if gib == 16 {
+                assert!(budget > 8 << 30);
+                assert!(queue_budget(&p, v) > 4 << 30);
+            }
+        }
+        assert_eq!(live_memory_budget(1 << 30, 16 << 30, false), 1 << 30);
+        assert_eq!(live_memory_budget(4 << 30, 64 << 20, true), 0);
+    }
     #[test]
     fn measured_starts_cover_cpu_and_ram_profiles() {
         for (cpus, expected) in [(2, 4), (4, 8), (8, 8)] {

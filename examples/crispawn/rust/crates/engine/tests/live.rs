@@ -15,6 +15,57 @@ use std::{
 };
 
 #[test]
+fn read_ahead_updates_actual_read_count_without_claiming_durability_or_regressing() {
+    use crispawn_engine::job::{JobEvent, JobEvents};
+    let directory = tempfile::tempdir().unwrap();
+    let diag = Diagnostics::new(&directory.path().join("ram"), 64 << 10, "a".repeat(32)).unwrap();
+    let mut snapshot:crispawn_core::types::Snapshot=serde_json::from_value(json!({
+        "schema_version":1,"backup_id":"a".repeat(32),"seq":0,"phase":"COPYING","code":"BACKUP_STARTED",
+        "total_bytes":"1000","read_raw_bytes":"10","durable_raw_bytes":"0","verified_raw_bytes":"0","stored_bytes":"0",
+        "elapsed_seconds":0.0,"eta_seconds":null,"verification_kind":"buffered_reopen"
+    })).unwrap();
+    diag.emit(JobEvent::Progress {
+        snapshot: snapshot.clone(),
+        percent: 0,
+        eta_seconds: None,
+        phase: "COPYING".into(),
+    });
+    diag.emit(JobEvent::ReadAhead {
+        backup_id: "a".repeat(32),
+        read_raw_bytes: "800".into(),
+        queued_encoded_bytes: "20".into(),
+        queue_budget_bytes: "100".into(),
+    });
+    let status = diag.snapshot();
+    assert_eq!(status.snapshot.unwrap().read_raw_bytes, 800);
+    assert_eq!(status.percent, 0);
+    snapshot.read_raw_bytes = 100;
+    snapshot.durable_raw_bytes = 80;
+    snapshot.seq = 1;
+    diag.emit(JobEvent::Progress {
+        snapshot,
+        percent: 4,
+        eta_seconds: None,
+        phase: "COPYING".into(),
+    });
+    let status = diag.snapshot();
+    let snapshot = status.snapshot.unwrap();
+    assert_eq!(snapshot.read_raw_bytes, 800);
+    assert_eq!(snapshot.durable_raw_bytes, 80);
+    assert_eq!(snapshot.verified_raw_bytes, 0);
+    assert_eq!(status.percent, 4);
+    diag.emit(JobEvent::ReadAhead {
+        backup_id: "b".repeat(32),
+        read_raw_bytes: "900".into(),
+        queued_encoded_bytes: "0".into(),
+        queue_budget_bytes: "100".into(),
+    });
+    assert_eq!(diag.snapshot().snapshot.unwrap().read_raw_bytes, 800);
+    diag.flush().unwrap();
+    diag.stop();
+}
+
+#[test]
 fn usb_boot_iso_requires_the_contract_filename_and_reports_the_missing_path() {
     let directory = tempfile::tempdir().unwrap();
     let expected = directory.path().join("crispawn.iso");

@@ -42,6 +42,9 @@ struct OpenFile {
     profiles: BTreeSet<String>,
 }
 
+#[path = "v3_pipeline.rs"]
+mod productive;
+
 fn checkpoint(
     f: &mut OpenFile,
     journal: &mut Journal,
@@ -54,7 +57,13 @@ fn checkpoint(
         return Ok(());
     }
     hooks.at("before_data_sync")?;
-    io::sync_file(&f.file)?;
+    io::sync_file(&f.file).map_err(|mut error| {
+        error.detail = format!(
+            "destination fsync: file_id={} source_offset={} raw_bytes={} stored_bytes={}: {}",
+            f.id, f.offset, f.raw, f.end, error.detail
+        );
+        error
+    })?;
     hooks.at("after_data_sync")?;
     journal.append(
         Change::Checkpoint {
@@ -673,11 +682,9 @@ fn run_inner(
             .map(|f| f.end)
             .sum::<u64>();
     report.emit("COPYING", "BACKUP_STARTED");
-    let cpus = std::thread::available_parallelism()
-        .map(|v| v.get() as u32)
-        .unwrap_or(1);
-    let mut feedback = (plan.format_version == 3)
-        .then(|| crate::online::Feedback::new(plan, control.verification_workers(), cpus));
+    // v3 owns feedback in its independent productive producer. Legacy v2 keeps
+    // its original pipeline and serialized format/recovery behavior.
+    let mut feedback: Option<crate::online::Feedback> = None;
     let read_gate = feedback
         .as_ref()
         .map(|f| std::sync::Arc::new(crate::online::ReadGate::new(f.active.workers, plan.workers)));
@@ -700,237 +707,263 @@ fn run_inner(
     let (sender, receiver) = mpsc::channel::<(u64, Result<Ready>)>();
     let mut outstanding = 0usize;
     let mut exhausted = false;
-    let copied = pool.pool().in_place_scope(|scope| -> Result<()> {
-        loop {
-            control.check_cancel()?;
-            space.poll(root)?;
-            verification.poll(&mut report)?;
-            while !exhausted
-                && outstanding
-                    < (feedback
-                        .as_ref()
-                        .map(|f| f.active.workers)
-                        .unwrap_or(plan.workers) as usize)
-                        * 2
-                && !control.pause_requested()
-            {
-                let range = match schedule.next() {
-                    Some(value) => value,
-                    None => {
-                        exhausted = true;
+    let copied = if plan.format_version == 3 {
+        productive::copy(
+            &source,
+            root,
+            meta,
+            plan,
+            id,
+            events,
+            hooks,
+            control,
+            &mut journal,
+            &mut open,
+            &mut next,
+            &ends,
+            &mut report,
+            pool,
+            verification,
+        )
+    } else {
+        pool.pool().in_place_scope(|scope| -> Result<()> {
+            loop {
+                control.check_cancel()?;
+                space.poll(root)?;
+                verification.poll(&mut report)?;
+                while !exhausted
+                    && outstanding
+                        < (feedback
+                            .as_ref()
+                            .map(|f| f.active.workers)
+                            .unwrap_or(plan.workers) as usize)
+                            * 2
+                    && !control.pause_requested()
+                {
+                    let range = match schedule.next() {
+                        Some(value) => value,
+                        None => {
+                            exhausted = true;
+                            break;
+                        }
+                    };
+                    let region = region_of(range, count, regions as u64);
+                    if range < next[region] {
+                        continue;
+                    }
+                    let send = sender.clone();
+                    let source = &source;
+                    let read_gate = read_gate.clone();
+                    let lane = region;
+                    let (profile, read_bytes) =
+                        feedback.as_mut().map(|f| f.next(lane)).unwrap_or((
+                            crate::online::Profile {
+                                codec: plan.codec,
+                                level: plan.compression_level,
+                            },
+                            plan.read_bytes,
+                        ));
+                    outstanding += 1;
+                    scope.spawn(move |_| {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || -> Result<Ready> {
+                                let _permit = read_gate
+                                    .as_ref()
+                                    .map(|gate| gate.acquire(control))
+                                    .transpose()?;
+                                control.check_cancel()?;
+                                let (offset, length) = plan.range(meta.source.bytes, range)?;
+                                hooks.at("source_read")?;
+                                let mut raw = vec![0; length as usize];
+                                let read_start = std::time::Instant::now();
+                                io::read_exact_at(source, &mut raw, offset, read_bytes)?;
+                                let read_seconds = read_start.elapsed().as_secs_f64();
+                                hooks.at("codec_encode")?;
+                                let encode_start =
+                                    crate::online::cpu_seconds(libc::CLOCK_THREAD_CPUTIME_ID);
+                                let encoded =
+                                    codec::encode(raw.clone(), profile.codec, profile.level)?;
+                                let observation = crate::online::Observation {
+                                    lane,
+                                    requested: profile,
+                                    actual: encoded.codec,
+                                    raw: length,
+                                    stored: encoded.payload.len() as u64
+                                        + format::FRAME_HEADER as u64,
+                                    encode_cpu: crate::online::cpu_seconds(
+                                        libc::CLOCK_THREAD_CPUTIME_ID,
+                                    ) - encode_start,
+                                    read_seconds,
+                                    read_bytes,
+                                    writer_seconds: 0.0,
+                                };
+                                hooks.at("after_codec_encode")?;
+                                Ok(Ready {
+                                    range,
+                                    raw,
+                                    encoded,
+                                    observation,
+                                })
+                            },
+                        ))
+                        .unwrap_or_else(|_| {
+                            Err(Error::new(
+                                "ENGINE_PANICKED",
+                                "v2 read/compression worker panicked",
+                            ))
+                        });
+                        // The coordinator bounds outstanding jobs; a worker never blocks
+                        // a Rayon CPU on queue backpressure while hashing needs that CPU.
+                        let _ = send.send((range, result));
+                    });
+                }
+                if outstanding == 0 {
+                    if control.pause_requested() {
+                        for f in open.iter_mut().filter_map(Option::as_mut) {
+                            checkpoint(f, &mut journal, meta, plan, &mut report, hooks)?;
+                        }
+                        crate::destination_space::gate(&mut report, control, root, "COPYING")?;
+                        if let Some(feedback) = &mut feedback {
+                            feedback.resumed();
+                        }
+                        continue;
+                    }
+                    if exhausted {
                         break;
                     }
-                };
-                let region = region_of(range, count, regions as u64);
-                if range < next[region] {
-                    continue;
                 }
-                let send = sender.clone();
-                let source = &source;
-                let read_gate = read_gate.clone();
-                let lane = region;
-                let (profile, read_bytes) = feedback.as_mut().map(|f| f.next(lane)).unwrap_or((
-                    crate::online::Profile {
-                        codec: plan.codec,
-                        level: plan.compression_level,
-                    },
-                    plan.read_bytes,
-                ));
-                outstanding += 1;
-                scope.spawn(move |_| {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                        || -> Result<Ready> {
-                            let _permit = read_gate
-                                .as_ref()
-                                .map(|gate| gate.acquire(control))
-                                .transpose()?;
-                            control.check_cancel()?;
-                            let (offset, length) = plan.range(meta.source.bytes, range)?;
-                            hooks.at("source_read")?;
-                            let mut raw = vec![0; length as usize];
-                            let read_start = std::time::Instant::now();
-                            io::read_exact_at(source, &mut raw, offset, read_bytes)?;
-                            let read_seconds = read_start.elapsed().as_secs_f64();
-                            hooks.at("codec_encode")?;
-                            let encode_start =
-                                crate::online::cpu_seconds(libc::CLOCK_THREAD_CPUTIME_ID);
-                            let encoded = codec::encode(raw.clone(), profile.codec, profile.level)?;
-                            let observation = crate::online::Observation {
-                                lane,
-                                requested: profile,
-                                actual: encoded.codec,
-                                raw: length,
-                                stored: encoded.payload.len() as u64 + format::FRAME_HEADER as u64,
-                                encode_cpu: crate::online::cpu_seconds(
-                                    libc::CLOCK_THREAD_CPUTIME_ID,
-                                ) - encode_start,
-                                read_seconds,
-                                read_bytes,
-                                writer_seconds: 0.0,
-                            };
-                            hooks.at("after_codec_encode")?;
-                            Ok(Ready {
-                                range,
-                                raw,
-                                encoded,
-                                observation,
-                            })
-                        },
-                    ))
-                    .unwrap_or_else(|_| {
-                        Err(Error::new(
-                            "ENGINE_PANICKED",
-                            "v2 read/compression worker panicked",
-                        ))
-                    });
-                    // The coordinator bounds outstanding jobs; a worker never blocks
-                    // a Rayon CPU on queue backpressure while hashing needs that CPU.
-                    let _ = send.send((range, result));
-                });
-            }
-            if outstanding == 0 {
-                if control.pause_requested() {
-                    for f in open.iter_mut().filter_map(Option::as_mut) {
-                        checkpoint(f, &mut journal, meta, plan, &mut report, hooks)?;
-                    }
-                    crate::destination_space::gate(&mut report, control, root, "COPYING")?;
-                    if let Some(feedback) = &mut feedback {
-                        feedback.resumed();
-                    }
-                    continue;
-                }
-                if exhausted {
-                    break;
-                }
-            }
-            match receiver.recv_timeout(Duration::from_millis(50)) {
-                Ok((range, result)) => {
-                    let ready = result?;
-                    let region = region_of(range, count, regions as u64);
-                    report.read += ready.raw.len() as u64;
-                    require(
-                        pending[region].insert(range, ready).is_none(),
-                        "DUPLICATE_RANGE",
-                        "v2 worker returned duplicate source range",
-                    )?;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => return Err(Error::new("ENGINE_EXITED", "v2 worker channel ended early")),
-            }
-            for region in 0..regions {
-                while let Some(mut ready) = pending[region].remove(&next[region]) {
-                    require(
-                        ready.range == next[region],
-                        "INVALID_STATE",
-                        "v2 source order",
-                    )?;
-                    let offset = plan.range(meta.source.bytes, ready.range)?.0;
-                    let record_bytes =
-                        format::FRAME_HEADER as u64 + ready.encoded.payload.len() as u64;
-                    if open[region].as_ref().is_some_and(|f| {
-                        f.end + record_bytes + format::FOOTER as u64 > plan.container_bytes
-                    }) {
-                        let entry = seal(
-                            open[region].take().unwrap(),
-                            root,
-                            &mut journal,
-                            meta,
-                            plan,
-                            id,
-                            &mut report,
-                            hooks,
+                match receiver.recv_timeout(Duration::from_millis(50)) {
+                    Ok((range, result)) => {
+                        let ready = result?;
+                        let region = region_of(range, count, regions as u64);
+                        report.read += ready.raw.len() as u64;
+                        require(
+                            pending[region].insert(range, ready).is_none(),
+                            "DUPLICATE_RANGE",
+                            "v2 worker returned duplicate source range",
                         )?;
-                        verification.submit(entry, &mut report, control)?;
                     }
-                    if open[region].is_none() {
-                        open[region] = Some(new_file(
-                            root,
-                            region,
-                            offset,
-                            &mut next_file,
-                            &mut journal,
-                            meta,
-                            plan,
-                            id,
-                            &mut report,
-                            hooks,
-                        )?);
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(_) => {
+                        return Err(Error::new("ENGINE_EXITED", "v2 worker channel ended early"))
                     }
-                    let f = open[region].as_mut().unwrap();
-                    require(
-                        f.offset + f.raw == offset
-                            && f.end + record_bytes + format::FOOTER as u64 <= plan.container_bytes,
-                        "INVALID_STATE",
-                        "v2 noncontiguous file or size overflow",
-                    )?;
-                    f.profiles.insert(format::profile_name(
-                        ready.encoded.codec,
-                        ready.encoded.level,
-                    ));
-                    pool.update(&mut f.hash, &ready.raw);
-                    let write_start = std::time::Instant::now();
-                    hooks.at("before_data_write")?;
-                    hooks.at("destination_space_check")?;
-                    crate::destination_space::check(root)?;
-                    io::write_all(
-                        &mut f.file,
-                        &format::Frame {
-                            codec: ready.encoded.codec,
-                            level: ready.encoded.level,
-                            raw_bytes: ready.raw.len() as u64,
-                            payload_bytes: ready.encoded.payload.len() as u32,
+                }
+                for region in 0..regions {
+                    while let Some(mut ready) = pending[region].remove(&next[region]) {
+                        require(
+                            ready.range == next[region],
+                            "INVALID_STATE",
+                            "v2 source order",
+                        )?;
+                        let offset = plan.range(meta.source.bytes, ready.range)?.0;
+                        let record_bytes =
+                            format::FRAME_HEADER as u64 + ready.encoded.payload.len() as u64;
+                        if open[region].as_ref().is_some_and(|f| {
+                            f.end + record_bytes + format::FOOTER as u64 > plan.container_bytes
+                        }) {
+                            let entry = seal(
+                                open[region].take().unwrap(),
+                                root,
+                                &mut journal,
+                                meta,
+                                plan,
+                                id,
+                                &mut report,
+                                hooks,
+                            )?;
+                            verification.submit(entry, &mut report, control)?;
                         }
-                        .encode(plan.format_version),
-                    )?;
-                    io::write_all(&mut f.file, &ready.encoded.payload)?;
-                    f.raw += ready.raw.len() as u64;
-                    f.frames += 1;
-                    f.end += record_bytes;
-                    report.stored += record_bytes;
-                    hooks.at("after_data_write")?;
-                    if f.frames % u64::from(plan.checkpoint_records) == 0 {
-                        checkpoint(f, &mut journal, meta, plan, &mut report, hooks)?;
-                    }
-                    ready.observation.writer_seconds = write_start.elapsed().as_secs_f64();
-                    if let Some(feedback) = &mut feedback {
-                        let (bytes, seconds) = verification.service();
-                        feedback.verification_service(bytes, seconds);
-                        if let Some(reason) = feedback.observe(
-                            &ready.observation,
-                            report.durable.saturating_sub(report.verified),
-                        ) {
-                            control.configure_verification_workers(feedback.verifiers);
-                            if let Some(gate) = &read_gate {
-                                gate.set(feedback.active.workers);
+                        if open[region].is_none() {
+                            open[region] = Some(new_file(
+                                root,
+                                region,
+                                offset,
+                                &mut next_file,
+                                &mut journal,
+                                meta,
+                                plan,
+                                id,
+                                &mut report,
+                                hooks,
+                            )?);
+                        }
+                        let f = open[region].as_mut().unwrap();
+                        require(
+                            f.offset + f.raw == offset
+                                && f.end + record_bytes + format::FOOTER as u64
+                                    <= plan.container_bytes,
+                            "INVALID_STATE",
+                            "v2 noncontiguous file or size overflow",
+                        )?;
+                        f.profiles.insert(format::profile_name(
+                            ready.encoded.codec,
+                            ready.encoded.level,
+                        ));
+                        pool.update(&mut f.hash, &ready.raw);
+                        let write_start = std::time::Instant::now();
+                        hooks.at("before_data_write")?;
+                        hooks.at("destination_space_check")?;
+                        crate::destination_space::check(root)?;
+                        io::write_all(
+                            &mut f.file,
+                            &format::Frame {
+                                codec: ready.encoded.codec,
+                                level: ready.encoded.level,
+                                raw_bytes: ready.raw.len() as u64,
+                                payload_bytes: ready.encoded.payload.len() as u32,
                             }
-                            events.settings(
-                                &feedback.active,
-                                feedback.verifiers,
-                                meta.source.bytes,
-                                &reason,
-                            );
-                        }
-                    }
-                    next[region] += 1;
-                    outstanding -= 1;
-                    if next[region] == ends[region] {
-                        let entry = seal(
-                            open[region].take().unwrap(),
-                            root,
-                            &mut journal,
-                            meta,
-                            plan,
-                            id,
-                            &mut report,
-                            hooks,
+                            .encode(plan.format_version),
                         )?;
-                        verification.submit(entry, &mut report, control)?;
+                        io::write_all(&mut f.file, &ready.encoded.payload)?;
+                        f.raw += ready.raw.len() as u64;
+                        f.frames += 1;
+                        f.end += record_bytes;
+                        report.stored += record_bytes;
+                        hooks.at("after_data_write")?;
+                        if f.frames % u64::from(plan.checkpoint_records) == 0 {
+                            checkpoint(f, &mut journal, meta, plan, &mut report, hooks)?;
+                        }
+                        ready.observation.writer_seconds = write_start.elapsed().as_secs_f64();
+                        if let Some(feedback) = &mut feedback {
+                            let (bytes, seconds) = verification.service();
+                            feedback.verification_service(bytes, seconds);
+                            if let Some(reason) = feedback.observe(
+                                &ready.observation,
+                                report.durable.saturating_sub(report.verified),
+                            ) {
+                                control.configure_verification_workers(feedback.verifiers);
+                                if let Some(gate) = &read_gate {
+                                    gate.set(feedback.active.workers);
+                                }
+                                events.settings(
+                                    &feedback.active,
+                                    feedback.verifiers,
+                                    meta.source.bytes,
+                                    &reason,
+                                );
+                            }
+                        }
+                        next[region] += 1;
+                        outstanding -= 1;
+                        if next[region] == ends[region] {
+                            let entry = seal(
+                                open[region].take().unwrap(),
+                                root,
+                                &mut journal,
+                                meta,
+                                plan,
+                                id,
+                                &mut report,
+                                hooks,
+                            )?;
+                            verification.submit(entry, &mut report, control)?;
+                        }
                     }
                 }
             }
-        }
-        Ok(())
-    });
+            Ok(())
+        })
+    };
     if let Err(error) = copied {
         if error.code == "CANCELLED" {
             for f in open.iter_mut().filter_map(Option::as_mut) {

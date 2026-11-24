@@ -65,9 +65,10 @@ fn read_logs(root: &Path) -> Vec<String> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .map(|e| e.path())
         .filter(|p| {
-            p.file_name()
-                .and_then(|v| v.to_str())
-                .is_some_and(|v| v.starts_with("events-") && v.ends_with(".jsonl"))
+            p.file_name().and_then(|v| v.to_str()).is_some_and(|v| {
+                (v.starts_with("events-") && v.ends_with(".jsonl"))
+                    || v == "supervisor-failure.jsonl"
+            })
         })
         .collect();
     paths.sort();

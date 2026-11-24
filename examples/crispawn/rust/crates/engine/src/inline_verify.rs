@@ -27,6 +27,7 @@ pub(crate) struct Inline {
     service_bytes: Arc<AtomicU64>,
     failed: Arc<Mutex<Option<Error>>>,
     stop: Arc<AtomicBool>,
+    activity: Arc<AtomicU64>,
     expected: BTreeMap<u64, FileEntry>,
     completed: BTreeMap<u64, (FileEntry, crispawn_core::types::SourceIdentity)>,
     phase: &'static str,
@@ -62,9 +63,11 @@ impl Inline {
         let service_bytes = Arc::new(AtomicU64::new(0));
         let failed = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
+        let activity = Arc::new(AtomicU64::new(0));
         for index in 0..workers {
             let nanos = service_nanos.clone();
             let bytes = service_bytes.clone();
+            let activity = activity.clone();
             let (rx, tx, read, failed, stop) = (
                 rx.clone(),
                 tx.clone(),
@@ -92,6 +95,8 @@ impl Inline {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> Result<crispawn_core::types::SourceIdentity> {
                             control.check_cancel()?;
+                            let mut active = crate::control::Activity::new(&activity);
+                            active.wait(control, &stop)?;
                             if target.is_none() {
                                 hooks.at("verify_read")?;
                             }
@@ -110,17 +115,7 @@ impl Inline {
                                     ));
                                 }
                                 read.fetch_add(raw.len() as u64, Ordering::Relaxed);
-                                while control.pause_requested() {
-                                    paused = true;
-                                    control.check_cancel()?;
-                                    if stop.load(Ordering::Acquire) {
-                                        return Err(Error::new(
-                                            "CANCELLED",
-                                            "verification stopped while paused",
-                                        ));
-                                    }
-                                    std::thread::sleep(Duration::from_millis(25));
-                                }
+                                paused |= active.wait(control, &stop)?;
                                 Ok(())
                             };
                             if let Some(target) = target {
@@ -205,6 +200,7 @@ impl Inline {
             service_bytes,
             failed,
             stop,
+            activity,
             expected: BTreeMap::new(),
             completed: BTreeMap::new(),
             phase: if target.is_some() {
@@ -219,6 +215,9 @@ impl Inline {
             self.service_bytes.load(Ordering::Relaxed),
             self.service_nanos.load(Ordering::Relaxed) as f64 * 1e-9,
         )
+    }
+    pub fn pause_ready(&self) -> bool {
+        self.activity.load(Ordering::Acquire) == 0
     }
     pub fn poll(&mut self, report: &mut Reporter<'_>) -> Result<()> {
         let before = (report.verified, report.verification_read);

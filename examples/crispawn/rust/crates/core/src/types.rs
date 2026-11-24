@@ -218,6 +218,9 @@ pub struct Snapshot {
 }
 pub trait EventSink: Send + Sync {
     fn emit(&self, snapshot: Snapshot);
+    /// Actual completed source reads; queued bytes are encoded payload/storage,
+    /// never durable or verified progress.
+    fn prefetch(&self, _backup_id: &str, _read: u64, _queued: u64, _budget: u64) {}
     /// Productive-copy feedback; observers must never affect source coverage.
     fn settings(
         &self,

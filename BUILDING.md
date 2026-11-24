@@ -64,3 +64,8 @@ NTFS writes, unreadable metadata, and actual kernel mount-error capture. See
 [NTFS diagnostics](docs/NTFS-DIAGNOSTICS.md) for the error codes, diagnostic
 persistence and the separate Windows-formatted-media test.
 
+The v3 producer/writer boundary and independent supervisor failure records are
+described in [Copy pipeline and failure records](docs/IO-PIPELINE.md). Native
+tests exercise held-checkpoint overlap and bounded failure handling using
+ordinary temporary files, separately from VM and physical-device acceptance.
+

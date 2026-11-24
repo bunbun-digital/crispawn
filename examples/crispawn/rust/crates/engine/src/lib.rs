@@ -11,6 +11,7 @@ pub mod control;
 mod destination_space;
 pub mod device;
 pub mod diagnostics;
+mod failure_persistence;
 mod inline_verify;
 pub mod io;
 pub mod job;

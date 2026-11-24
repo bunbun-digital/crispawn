@@ -33,6 +33,8 @@ pub fn text(event: &JobEvent) -> String {
         JobEvent::Progress { snapshot: s, percent, eta_seconds, phase } =>
             format!("[{}] {percent}% 読出={} bytes 同期済={} bytes 全体={} bytes 検証読出={} bytes 検証済={} bytes ETA={}",
                 clean(phase), s.read_raw_bytes, s.durable_raw_bytes, s.total_bytes, s.verification_read_raw_bytes, s.verified_raw_bytes, eta(*eta_seconds)),
+        JobEvent::ReadAhead { read_raw_bytes, queued_encoded_bytes, queue_budget_bytes, .. } =>
+            format!("[READ_AHEAD] 読出={} bytes 圧縮済み待機={} / {} bytes", clean(read_raw_bytes), clean(queued_encoded_bytes), clean(queue_budget_bytes)),
         JobEvent::Finished { success, code, report_file, dataset_committed } =>
             format!("[{}] {} 確定済={} レポート={}", if *success { "完了" } else { "停止" },
                 clean(code), dataset_committed, clean(&report_file.to_string_lossy())),

@@ -372,11 +372,38 @@ impl JobEvents for Diagnostics {
                     )) {
                         self.last_progress.store(self.ms(), Ordering::Relaxed);
                     }
-                    s.snapshot = Some(snapshot.clone());
+                    let mut current = snapshot.clone();
+                    if let Some(previous) = s
+                        .snapshot
+                        .as_ref()
+                        .filter(|old| old.backup_id == current.backup_id)
+                    {
+                        current.read_raw_bytes =
+                            current.read_raw_bytes.max(previous.read_raw_bytes);
+                    }
+                    s.snapshot = Some(current);
                     s.percent = *percent;
                     s.eta_seconds = *eta_seconds;
                     s.phase = phase.clone();
                     s.detail.clear();
+                }
+                JobEvent::ReadAhead {
+                    backup_id,
+                    read_raw_bytes,
+                    ..
+                } => {
+                    if let Some(snapshot) = s
+                        .snapshot
+                        .as_mut()
+                        .filter(|old| old.backup_id == *backup_id)
+                    {
+                        if let Ok(read) = read_raw_bytes.parse::<u64>() {
+                            if read <= snapshot.total_bytes && read > snapshot.read_raw_bytes {
+                                snapshot.read_raw_bytes = read;
+                                self.last_progress.store(self.ms(), Ordering::Relaxed);
+                            }
+                        }
+                    }
                 }
                 JobEvent::ProbeTrial {
                     candidate_id,
@@ -415,6 +442,11 @@ impl JobEvents for Diagnostics {
                     | "RESTORING"
                     | "VERIFYING_RESTORE"
             );
+        }
+        // Read-ahead is live RAM telemetry, not a new durable checkpoint. Do
+        // not add one USB fsync per sample while diagnosing a slow writer.
+        if matches!(event, JobEvent::ReadAhead { .. }) {
+            return;
         }
         self.record(
             "job_event",

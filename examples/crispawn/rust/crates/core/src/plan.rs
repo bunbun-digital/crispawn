@@ -162,6 +162,9 @@ impl Plan {
         } else {
             (2 * u64::from(self.workers) + 1) * 2 * self.range_bytes
         };
+        // Serialized archive plans retain their historical validation bound.
+        // The engine reserves new runtime queues separately, so old backups
+        // remain readable even when their previous memory ceiling was tight.
         buffers + u64::from(self.workers) * workspace + (128 << 20)
     }
 }

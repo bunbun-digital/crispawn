@@ -1395,6 +1395,11 @@ fn run_inner(
         .unwrap_or_else(|e| e.into_inner())
         .ntfs_mounted = true;
     io::atomic_write(root, "owned-mount.json", &io::json(&mount.device)?)?;
+    crate::supervisor::failure_log_target(
+        &diag.snapshot().job_id,
+        &mount.device.number,
+        config.log_policy != LogPolicy::Never,
+    );
     {
         let mut s = diag.status.lock().unwrap_or_else(|e| e.into_inner());
         s.destination_partition = mount.device.path.to_string_lossy().into_owned();
@@ -1440,16 +1445,21 @@ fn run_inner(
         .unwrap_or_else(|e| e.into_inner())
         .can_restore = config.restore.is_some();
     let available = metric("/proc/meminfo", "MemAvailable:").saturating_mul(1024);
-    config.tuning.plan.memory_limit_bytes = config
-        .tuning
-        .plan
-        .memory_limit_bytes
-        .min(available.saturating_sub(192 << 20));
+    config.tuning.plan.memory_limit_bytes = crate::profiles::live_memory_budget(
+        config.tuning.plan.memory_limit_bytes,
+        available,
+        config.version == 2 && config.tuning.mode == crate::job_config::TuningMode::Auto,
+    );
+    diag.record("memory_budget", json!({"available_bytes":available.to_string(),
+        "processing_limit_bytes":config.tuning.plan.memory_limit_bytes.to_string(),
+        "os_headroom_bytes":available.saturating_sub(config.tuning.plan.memory_limit_bytes).to_string()}));
     diag.record(
         "device_discovery",
         json!({"devices":devices,"excluded_whole_disk":mount.device.whole_name}),
     );
-    diag.record("runtime_configured", json!({"runtime_version":config.version,"startup":config.startup,"ui_mode":config.interface,"log_policy":config.log_policy,"volume":config.volume}));
+    diag.record("runtime_configured", json!({"runtime_version":config.version,"startup":config.startup,"ui_mode":config.interface,"log_policy":config.log_policy,"volume":config.volume,
+        "io_policy":config.tuning.io_policy,
+        "failure":{"poweroff":config.poweroff_on_failure,"delay_seconds":config.completion_seconds}}));
     let mut frontends = start_frontends(config.interface, diag)?;
     let mut network = crate::connection::Local;
     diag.record("network_configured", json!({"mode":config.network.mode()}));
