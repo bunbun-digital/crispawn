@@ -105,6 +105,7 @@ pub enum Text {
     StorageQueue,
     CurrentWrite,
     WriteWorkers,
+    ActiveWriters,
     ReadSpeed,
     WriteSpeed,
     StorageBaseline,
@@ -121,8 +122,9 @@ impl Language {
             Text::StorageQueue => ("書込待ちブロック", "Queued write blocks"),
             Text::CurrentWrite => ("現在のファイル", "Current file"),
             Text::WriteWorkers => ("書込並列度", "Write workers"),
+            Text::ActiveWriters => ("稼働", "active"),
             Text::ReadSpeed => ("読出速度", "Read speed"),
-            Text::WriteSpeed => ("書込速度（同期済み）", "Write speed (synced)"),
+            Text::WriteSpeed => ("書込速度", "Write speed"),
             Text::StorageBaseline => ("基準サイズ", "Baseline size"),
             Text::StorageWriting => ("書き込み中", "Writing"),
             Text::StorageSyncing => ("保存先への同期を待っています", "Waiting for destination sync"),
@@ -290,7 +292,7 @@ impl Language {
     pub fn storage_summary(self, s: &crate::live::StorageStatus) -> String {
         let phase = match s.phase.as_str() {
             "WRITING" => Text::StorageWriting,
-            "SYNCING" => Text::StorageSyncing,
+            "SYNCING" | "FINAL_SYNC" => Text::StorageSyncing,
             "CHECKING" => Text::StorageChecking,
             "SAVING_METADATA" => Text::StorageMetadata,
             _ => Text::StorageReady,
@@ -299,9 +301,9 @@ impl Language {
             Language::Ja => "MB/秒",
             Language::En => "MB/s",
         };
-        format!("{} {} · {} {:.1} MB · {} {}\n{} {:.1} {unit} · {} {:.1} {unit}\n{} · {:.1} {} · {} {:.1} MB",
+        format!("{} {} · {} {:.1} MB · {} {} ({} {})\n{} {:.1} {unit} · {} {:.1} {unit}\n{} · {:.1} {} · {} {:.1} MB",
             self.text(Text::StorageQueue),s.waiting_blocks,self.text(Text::CurrentWrite),s.current_file_bytes as f64/1e6,
-            self.text(Text::WriteWorkers),s.write_workers,self.text(Text::ReadSpeed),s.read_mb_per_second,
+            self.text(Text::WriteWorkers),s.write_workers,self.text(Text::ActiveWriters),s.active_write_workers,self.text(Text::ReadSpeed),s.read_mb_per_second,
             self.text(Text::WriteSpeed),s.write_mb_per_second,self.text(phase),s.phase_elapsed_ms as f64/1000.0,
             self.text(Text::StorageElapsed),self.text(Text::StorageBaseline),s.baseline_bytes as f64/1e6)
     }
@@ -311,7 +313,9 @@ impl Language {
         let key = match code {
             "DESTINATION_LOW_SPACE" => Text::ErrorLowSpace,
             "DESTINATION_FULL" | "INSUFFICIENT_SPACE" => Text::ErrorFull,
-            "IO_ERROR" | "DIAGNOSTIC_LOG_FAILED" | "NTFS_SYNC_FAILED" => Text::ErrorIo,
+            "IO_ERROR" | "DIAGNOSTIC_LOG_FAILED" | "NTFS_SYNC_FAILED" | "STORAGE_WORKER_FAILED" => {
+                Text::ErrorIo
+            }
             "BOOT_ISO_NOT_FOUND" => Text::ErrorBootIso,
             "NTFS_VOLUME_DIRTY" => Text::ErrorNtfsDirty,
             "NTFS_STATE_UNAVAILABLE" => Text::ErrorNtfsState,

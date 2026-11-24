@@ -652,6 +652,10 @@ fn run(
     storage: std::sync::Arc<storage::Shared>,
 ) -> Result<verify::Report> {
     let pool = storage.pool.clone();
+    if plan.segmented_storage {
+        storage.bind_destination(root)?;
+    }
+    let deferred = io::DeferredSync::new(plan.segmented_storage);
     std::thread::scope(|scope| {
         let _monitor_stop = storage::StopMonitor(storage.clone());
         if plan.segmented_storage {
@@ -673,6 +677,7 @@ fn run(
             &pool,
             &mut verification,
             &storage,
+            deferred,
         );
         if let Err(error) = &result {
             crate::supervisor::failure(error);
@@ -696,6 +701,7 @@ fn run_inner(
     pool: &CpuPool,
     verification: &mut crate::inline_verify::Inline,
     storage: &std::sync::Arc<storage::Shared>,
+    deferred: io::DeferredSync,
 ) -> Result<verify::Report> {
     let mut space = crate::destination_space::Monitor::new(root)?;
     let count = plan.range_count(meta.source.bytes);
@@ -739,7 +745,7 @@ fn run_inner(
     report.read = report.durable;
     if plan.segmented_storage {
         // Resume prefixes were checked before run_inner; count each only once.
-        storage.credit_source(report.durable);
+        storage.seed_source(report.durable);
     }
     report.stored = journal
         .state
@@ -1106,6 +1112,22 @@ fn run_inner(
         "MISSING_VERIFICATION",
         "verified file set changed before commit",
     )?;
+    // No part/journal/descriptor fsync during productive copying. All jobs and
+    // metadata are complete here; flush the filesystem before the commit marker.
+    drop(deferred);
+    if plan.segmented_storage {
+        hooks.at("before_final_storage_sync")?;
+        storage.final_sync(root)?;
+        hooks.at("after_final_storage_sync")?;
+        control.check_cancel()?;
+        io::unchanged(&source, &meta.source)?;
+        require(
+            storage.matches(root, &verified.files)?,
+            "MISSING_VERIFICATION",
+            "checked file set changed during final sync",
+        )?;
+        crate::destination_space::check(root)?;
+    }
     v2::write_commit(root, &meta.backup_id)?;
     hooks.at("after_commit")?;
     report.emit("COMPLETE", "BACKUP_COMMITTED");

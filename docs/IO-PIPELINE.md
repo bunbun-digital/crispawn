@@ -2,16 +2,22 @@
 
 Automatic plans now use [segmented compressed storage](SEGMENTED-STORAGE.md).
 The producer and queue described here remain; physical part confirmation replaces
-sealed-file decompression for those plans. Legacy contiguous plans retain the
-sealed-file checking path described below.
+sealed-file decompression for those plans. Two writer/checker threads use a
+bounded four-part queue and the OS cache, without per-file sync. Log records
+continue appending without per-record sync during copying. After draining all
+work, a filesystem barrier precedes the durably written COMMITTED marker;
+final log/session close and unmount finish before success and poweroff.
+Legacy contiguous plans retain their former checkpoint and sealed-file checking
+path; historical checkpoint durability statements apply only to them.
 
 The productive v3 path separates source reads, compression and BLAKE3 from
 destination writes, checkpoints and concurrent verification:
 
 ```text
 source -> parallel reads/encoding -> ordered per-file BLAKE3
-       -> bounded encoded queue -> buffered file writes -> Linux cache -> USB
-                                   -> durable checkpoints -> file verification
+       -> bounded encoded queue -> bounded part queue -> two cached writers
+       -> per-part encoded-byte readback -> ordered descriptors
+       -> final filesystem sync -> COMMITTED -> log/session close and unmount
 ```
 
 The producer continues useful work while the destination writer is waiting for
@@ -35,10 +41,10 @@ prefetch until memory becomes available and is not itself an I/O error.
 
 Writes continue to use the ordinary Linux page cache. RAM size alone does not
 promise any particular amount of unsynced data: the processing limit, encoded
-queue limit, kernel writeback limits and durability checkpoints all matter.
-For example, eight 16 MiB frames give a 128 MiB *raw* checkpoint interval, not
-a promise to cache 10 GB before synchronizing. Checkpoint durability is preserved;
-the producer no longer shares the writer's synchronization wait.
+queue limit and kernel writeback limits all matter. Automatic copies do not
+wait for intermediate fsyncs; the storage system may still throttle writes when
+dirty-page limits are reached. The retained filesystem fd lets the final sync
+detect earlier writeback errors. Legacy contiguous plans retain checkpoint fsyncs.
 
 `read_ahead` job events report actual completed source reads, queued encoded
 bytes and queue budget. Read-ahead does not advance durable/verified progress
@@ -49,12 +55,13 @@ fsync for each sample. Lifecycle, tuning and failure records retain their normal
 persistent logging. The independent failure file includes the latest matching
 progress snapshot when available.
 
-Pausing waits for active source and verification I/O to become quiescent and
-synchronizes the already written prefixes. Encoded frames remain in bounded RAM;
-they are not all flushed to the USB before acknowledging pause. Read bytes can
-therefore exceed durable bytes while paused. Resume retains the queued data and
-resets tuning timing; cancellation releases backpressure and leaves only durable
-prefixes for an explicit resume, without a COMMITTED marker.
+Pausing waits for active source/writer/checker I/O to become quiescent. Encoded
+frames can remain in bounded RAM and accepted data in the OS cache; automatic
+copy does not promise physical durability at pause. Resume means continuing this
+paused running process. LiveISO does not automatically resume after power loss.
+Cancellation releases backpressure and leaves incomplete files without a
+COMMITTED marker; the ordinary-file development adapter retains its explicit
+validated recovery path without promising power-loss-safe intermediate state.
 
 ## Slow writes and the stall deadline
 

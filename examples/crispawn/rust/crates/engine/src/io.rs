@@ -7,8 +7,10 @@ use crispawn_core::{
 };
 use sha2::{Digest, Sha256};
 use std::{
+    cell::Cell,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
+    os::fd::AsRawFd,
     os::unix::fs::{FileExt, FileTypeExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
@@ -18,6 +20,20 @@ use std::{
 static TRANSIENT_RETRIES: AtomicU32 = AtomicU32::new(3);
 static RETRY_DELAY_MS: AtomicU64 = AtomicU64::new(100);
 static RETRIES: AtomicU64 = AtomicU64::new(0);
+thread_local! { static DEFER_SYNC: Cell<bool> = const { Cell::new(false) }; }
+/// Only the owned segmented-copy thread defers its intermediate sync calls.
+/// Restore, failure persistence and other threads retain their normal policy.
+pub(crate) struct DeferredSync(bool);
+impl DeferredSync {
+    pub fn new(enabled: bool) -> Self {
+        Self(DEFER_SYNC.with(|v| v.replace(enabled)))
+    }
+}
+impl Drop for DeferredSync {
+    fn drop(&mut self) {
+        DEFER_SYNC.with(|v| v.set(self.0));
+    }
+}
 pub fn configure_retries(retries: u32, delay_ms: u64) {
     TRANSIENT_RETRIES.store(retries.min(8), Ordering::Relaxed);
     RETRY_DELAY_MS.store(delay_ms.clamp(1, 2000), Ordering::Relaxed);
@@ -77,9 +93,26 @@ pub fn write_all(writer: &mut (impl Write + ?Sized), mut bytes: &[u8]) -> Result
     Ok(())
 }
 pub fn sync_file(file: &File) -> Result<()> {
+    if DEFER_SYNC.with(Cell::get) {
+        return Ok(());
+    }
     // EIO from writeback can mean previously accepted data was lost. A later
     // successful fsync alone cannot certify recovery; do not hide that error.
     retry(true, || file.sync_all().map_err(Error::from))?;
+    crate::supervisor::progress();
+    Ok(())
+}
+/// Flush data and metadata once after all copy workers/receipts are complete.
+/// Never retry a writeback EIO into an apparent successful commit.
+pub(crate) fn sync_filesystem(file: &File) -> Result<()> {
+    retry(true, || {
+        // SAFETY: file owns a valid descriptor for the destination filesystem.
+        if unsafe { libc::syncfs(file.as_raw_fd()) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error().into())
+        }
+    })?;
     crate::supervisor::progress();
     Ok(())
 }

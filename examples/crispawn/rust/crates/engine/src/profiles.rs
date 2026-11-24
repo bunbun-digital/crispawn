@@ -22,7 +22,9 @@ pub fn memory_bound(plan: &Plan, verifiers: u32) -> u64 {
 pub(crate) fn processing_workspace(plan: &Plan, verifiers: u32) -> u64 {
     plan.memory_bound()
         + if plan.segmented_storage {
-            0
+            // Two active writers, four queued part buffers and readback buffers.
+            // Keep this runtime cost separate from historical plan validation.
+            6 * plan.storage_buffer_bytes() + (2 << 20)
         } else {
             u64::from(verifiers) * ((128 << 20) + 2 * plan.range_bytes)
         }
@@ -65,7 +67,7 @@ pub fn select(
     plan.container_bytes = plan.container_bytes.max(plan.range_bytes + 352);
     plan.memory_limit_bytes = memory_bytes.min(template.memory_limit_bytes);
     plan.workers = cpus.saturating_mul(2).min(8);
-    let mut verifiers = 1;
+    let verifiers = crate::storage_worker::WORKERS;
     (plan.codec, plan.compression_level) = match profile {
         Profile::Balanced => (Codec::Zstd, 3),
         Profile::LongMatches => (Codec::Zstd, 6),
@@ -79,8 +81,6 @@ pub fn select(
         }
         if plan.workers > 1 {
             plan.workers = plan.workers.div_ceil(2);
-        } else if verifiers > 1 {
-            verifiers = verifiers.div_ceil(2);
         } else if plan.range_bytes > 1 << 20 {
             plan.range_bytes /= 2;
         } else {
@@ -170,7 +170,7 @@ mod tests {
                     let (plan, verify) =
                         select(&template, profile, cpus, memory << 30, 1 << 40).unwrap();
                     assert_eq!(plan.workers, expected);
-                    assert_eq!(verify, 1);
+                    assert_eq!(verify, 2);
                     assert_eq!(plan.read_bytes, 1 << 20);
                     assert_eq!(plan.range_bytes, 16 << 20);
                     assert!(memory_bound(&plan, verify) <= plan.memory_limit_bytes);

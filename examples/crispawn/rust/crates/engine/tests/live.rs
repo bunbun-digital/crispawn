@@ -39,10 +39,12 @@ fn storage_progress_is_visible_without_a_new_writer_snapshot_and_formats_both_la
         queued_encoded_bytes: 6000000000,
         current_file_bytes: 4000000,
         baseline_bytes: 4000000,
-        write_workers: 1,
+        write_workers: 2,
+        active_write_workers: 2,
         written_bytes: 400000000,
         confirmed_bytes: 396000000,
         confirmed_source_bytes: 3960000000,
+        written_source_bytes: 4000000000,
         phase_elapsed_ms: 3100,
         read_mb_per_second: 35.2,
         write_mb_per_second: 1.7,
@@ -90,7 +92,7 @@ fn storage_progress_is_visible_without_a_new_writer_snapshot_and_formats_both_la
     assert!(!text.contains("保存データの確認（圧縮後）"));
     assert!(Language::En
         .storage_summary(&storage)
-        .contains("Write workers 1"));
+        .contains("Write workers 2"));
     if let Some(path) = std::env::var_os("CRISPAWN_TEST_RENDER_DIR") {
         let path = PathBuf::from(path);
         fs::create_dir_all(&path).unwrap();

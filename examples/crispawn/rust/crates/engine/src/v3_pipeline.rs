@@ -213,6 +213,10 @@ fn produce(
         .map(|v| v.get() as u32)
         .unwrap_or(1);
     let mut feedback = crate::online::Feedback::new(plan, control.verification_workers(), cpus);
+    if plan.segmented_storage {
+        feedback.verifiers = crate::storage_worker::WORKERS;
+        control.configure_verification_workers(feedback.verifiers);
+    }
     let gate = Arc::new(crate::online::ReadGate::new(
         feedback.active.workers,
         plan.workers,
@@ -386,7 +390,7 @@ fn produce(
                             .verification_service(observed.verify_bytes, observed.verify_seconds);
                         if let Some(reason) = feedback.observe(&ready.observation, observed.backlog)
                         {
-                            if plan.segmented_storage {feedback.verifiers=1;}
+                            if plan.segmented_storage {feedback.verifiers=crate::storage_worker::WORKERS;}
                             control.configure_verification_workers(feedback.verifiers);
                             gate.set(feedback.active.workers);
                             events.settings(
@@ -561,9 +565,7 @@ pub(super) fn copy(
                 }
                 if plan.segmented_storage {
                     for f in open.iter_mut().flatten() {
-                        if f.file.due() {
-                            checkpoint(f, journal, meta, plan, report, hooks)?;
-                        }
+                        f.file.poll()?;
                     }
                 }
                 space.poll(root)?;
@@ -651,9 +653,7 @@ pub(super) fn copy(
                 ));
                 report.stored += record_bytes;
                 hooks.at("after_data_write")?;
-                if (!plan.segmented_storage && f.frames % u64::from(plan.checkpoint_records) == 0)
-                    || f.file.due()
-                {
+                if !plan.segmented_storage && f.frames % u64::from(plan.checkpoint_records) == 0 {
                     checkpoint(f, journal, meta, plan, report, hooks)?;
                 }
                 next[region] += 1;

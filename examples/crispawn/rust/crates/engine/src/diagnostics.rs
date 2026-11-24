@@ -12,7 +12,7 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -35,6 +35,7 @@ pub struct Diagnostics {
     sender: mpsc::SyncSender<Message>,
     failure: Arc<Mutex<Option<String>>>,
     emergency: Mutex<std::collections::VecDeque<Vec<u8>>>,
+    defer_persistent_sync: Arc<AtomicBool>,
 }
 impl Diagnostics {
     pub fn new(root: &Path, capacity: u64, id: String) -> Result<Arc<Self>> {
@@ -49,10 +50,12 @@ impl Diagnostics {
         let dropped = Arc::new(AtomicU64::new(0));
         let fail = failure.clone();
         let drop_count = dropped.clone();
+        let defer_persistent_sync = Arc::new(AtomicBool::new(false));
+        let deferred = defer_persistent_sync.clone();
         let path = root.to_path_buf();
         std::thread::spawn(move || {
             crate::supervisor::observer_thread();
-            let outcome = write_loop(&path, capacity, receiver, &drop_count, &fail);
+            let outcome = write_loop(&path, capacity, receiver, &drop_count, &fail, &deferred);
             if let Err(e) = outcome {
                 *fail.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
             }
@@ -66,12 +69,16 @@ impl Diagnostics {
             sender,
             failure,
             emergency: Mutex::new(std::collections::VecDeque::new()),
+            defer_persistent_sync,
         }))
     }
     pub fn ms(&self) -> u64 {
         self.start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
     }
     pub fn phase(&self, phase: &str, detail: &str) {
+        if phase == "COPYING" {
+            self.defer_persistent_sync.store(true, Ordering::Release);
+        }
         crate::supervisor::phase(phase);
         {
             let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -193,7 +200,8 @@ impl Diagnostics {
         Ok(())
     }
     /// Backfill startup RAM segments and mirror all subsequent records automatically.
-    /// A zero interval syncs every record; a positive interval batches durability.
+    /// Outside productive copying, zero syncs every record and positive intervals
+    /// batch durability. Copy-time records are appended without per-record sync.
     pub fn begin_persistent(&self, target: &Path, sync_interval_ms: u32) -> Result<()> {
         require(
             sync_interval_ms <= 60_000,
@@ -252,6 +260,8 @@ struct Persistent {
     interval: Duration,
     last_sync: Instant,
     dirty: bool,
+    deferred: Arc<AtomicBool>,
+    filesystem: File,
 }
 impl Persistent {
     fn open(
@@ -260,6 +270,7 @@ impl Persistent {
         interval_ms: u32,
         cap: u64,
         dropped: u64,
+        deferred: Arc<AtomicBool>,
     ) -> Result<Self> {
         fs::create_dir(target)?;
         let mut log = Self {
@@ -268,6 +279,8 @@ impl Persistent {
             interval: Duration::from_millis(u64::from(interval_ms)),
             last_sync: Instant::now(),
             dirty: false,
+            deferred,
+            filesystem: File::open(target)?,
         };
         for path in files {
             let src = io::open_regular(path, false)?;
@@ -293,6 +306,7 @@ impl Persistent {
         )
     }
     fn rotate(&mut self, name: &std::ffi::OsStr) -> Result<()> {
+        let _deferred = io::DeferredSync::new(self.deferred.load(Ordering::Acquire));
         self.sync()?;
         self.current = Some(io::create_new(&self.root.join(name))?);
         io::sync_dir(&self.root)
@@ -307,6 +321,9 @@ impl Persistent {
         self.sync_if_due()
     }
     fn sync(&mut self) -> Result<()> {
+        if self.deferred.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if let Some(file) = &self.current {
             io::sync_file(file)?;
         }
@@ -321,6 +338,11 @@ impl Persistent {
         Ok(())
     }
     fn close(mut self, cap: u64, dropped: u64, status: Option<&Status>) -> Result<()> {
+        if self.deferred.swap(false, Ordering::AcqRel) {
+            // The ordered Close message follows all queued copy records. Flush
+            // every rotated segment, using an fd retained since opening the log.
+            io::sync_filesystem(&self.filesystem)?;
+        }
         self.sync()?;
         self.current.take();
         if let Some(status) = status {
@@ -332,6 +354,14 @@ impl Persistent {
 }
 impl JobEvents for Diagnostics {
     fn emit(&self, event: JobEvent) {
+        // Keep appending logs to NTFS during copying, without submitting another
+        // device-wide flush for every progress record. Final close still syncs.
+        match &event {
+            JobEvent::Progress { phase, .. } if phase == "COPYING" => {
+                self.defer_persistent_sync.store(true, Ordering::Release)
+            }
+            _ => {}
+        }
         let mut persist_storage = false;
         {
             let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -510,6 +540,7 @@ fn write_loop(
     receiver: mpsc::Receiver<Message>,
     dropped: &AtomicU64,
     failure: &Mutex<Option<String>>,
+    deferred: &Arc<AtomicBool>,
 ) -> Result<()> {
     let per_file = cap / 4;
     let mut sequence = 0u64;
@@ -569,6 +600,7 @@ fn write_loop(
                         interval_ms,
                         cap,
                         dropped.load(Ordering::Relaxed),
+                        deferred.clone(),
                     )?);
                     Ok(())
                 })();

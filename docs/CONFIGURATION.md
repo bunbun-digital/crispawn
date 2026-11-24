@@ -15,6 +15,13 @@ Schemas describe shared wire types; schema validity alone never enables a backen
   or consumption/progress forecast is used.
 - `logging.policy`: `always`, `on_error`, or `never`. Logs use the backup destination.
 
+During copying, enabled logs are appended continuously through the OS cache.
+Per-record/periodic durability sync is deferred until final/error close, including
+when `sync_interval_ms` is zero; outside copying its configured interval applies.
+Successful completion still requires the final storage/log synchronization and
+filesystem finalization before the shutdown countdown. Pause/resume refers to
+the running process, not automatic continuation after a power cut.
+
 Use `tools/configure-crispawn.py` to create a new configured ISO. Never edit an
 existing image in place. On USB, an external `/crispawn-config.json` overrides
 the embedded `/etc/perfect-backup/live.json` as a whole; malformed overrides

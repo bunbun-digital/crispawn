@@ -63,6 +63,139 @@ fn parts(root: &Path) -> Vec<PathBuf> {
     out.sort();
     out
 }
+#[cfg(target_os = "linux")]
+#[test]
+fn copy_has_no_part_fsync_and_final_flush_failure_never_commits() {
+    use std::process::Command;
+    let t = tempfile::tempdir().unwrap();
+    let library = t.path().join("sync-trace.so");
+    let status = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2", "-o"])
+        .arg(&library)
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/storage_sync_trace.c"
+        ))
+        .arg("-ldl")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    for fail in [false, true] {
+        let case = t
+            .path()
+            .join(if fail { "writeback-error" } else { "success" });
+        fs::create_dir(&case).unwrap();
+        let archive = case.join("archive");
+        let trace = case.join("sync.tsv");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "storage_sync_fixture_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("LD_PRELOAD", &library)
+            .env("CRISPAWN_TEST_SYNC_TRACE", &trace)
+            .env("CRISPAWN_TEST_ARCHIVE", &archive);
+        if fail {
+            command.env("CRISPAWN_TEST_SYNCFS_EIO", "1");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = fs::read_to_string(trace).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        let barriers: Vec<_> = lines
+            .iter()
+            .filter(|line| line.starts_with("syncfs\t") && line.contains("/archive\t"))
+            .collect();
+        assert_eq!(barriers.len(), 1, "{text}");
+        assert!(barriers[0].ends_with("committed=0"));
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("/segments/") || line.contains("/data/data-")),
+            "{text}"
+        );
+        assert!(
+            lines
+                .iter()
+                .filter(|line| line.contains("journal.jsonl"))
+                .count()
+                <= 1,
+            "{text}"
+        );
+        let log_syncs = lines
+            .iter()
+            .filter(|line| line.contains("/continuous/events-"))
+            .count();
+        assert!(
+            log_syncs <= 2,
+            "log rotation/progress must not force device flushes during copy: {text}"
+        );
+        assert_eq!(archive.join("COMMITTED").exists(), !fail);
+        if !fail {
+            let barrier = lines
+                .iter()
+                .position(|line| line.starts_with("syncfs\t") && line.contains("/archive\t"))
+                .unwrap();
+            assert!(
+                lines[barrier + 1..]
+                    .iter()
+                    .any(|line| line.starts_with("fsync\t")),
+                "commit marker must also be synced"
+            );
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "launched only by the syscall tracing parent with a private LD_PRELOAD"]
+fn storage_sync_fixture_child() {
+    let archive = PathBuf::from(std::env::var_os("CRISPAWN_TEST_ARCHIVE").unwrap());
+    let root = archive.parent().unwrap();
+    let source = root.join("source");
+    fs::write(&source, bytes()).unwrap();
+    let diag =
+        crispawn_engine::diagnostics::Diagnostics::new(&root.join("ram"), 64 << 10, "a".repeat(32))
+            .unwrap();
+    diag.record("start", serde_json::json!({"test":true}));
+    diag.flush().unwrap();
+    diag.begin_persistent(&root.join("continuous"), 0).unwrap();
+    diag.phase("COPYING", "testing continuous cached log writes");
+    for n in 0..40 {
+        diag.record(
+            "during_copy",
+            serde_json::json!({"n":n,"padding":"x".repeat(2048)}),
+        );
+    }
+    diag.flush().unwrap();
+    let result = backup::backup(
+        &source,
+        &archive,
+        plan(),
+        root,
+        &NoEvents,
+        &NoHooks,
+        &AtomicBool::new(false),
+    );
+    diag.record("copy_result", serde_json::json!({"success":result.is_ok()}));
+    diag.close_persistent().unwrap();
+    diag.stop();
+    if std::env::var_os("CRISPAWN_TEST_SYNCFS_EIO").is_some() {
+        let error = result.unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert!(!archive.join("COMMITTED").exists());
+    } else {
+        assert!(result.unwrap().dataset_committed);
+        verify::verify(&archive, root, &NoEvents).unwrap();
+    }
+}
 #[test]
 fn one_compression_frame_spans_independently_checked_physical_files_and_restores() {
     let t = tempfile::tempdir().unwrap();
@@ -118,7 +251,8 @@ fn changed_part_is_rejected_before_restore_target_is_created() {
     .unwrap();
     let p = parts(&archive).remove(0);
     let mut b = fs::read(&p).unwrap();
-    b[100] ^= 1;
+    let middle = b.len() / 2;
+    b[middle] ^= 1;
     fs::write(&p, b).unwrap();
     assert_eq!(
         verify::verify(&archive, t.path(), &NoEvents)
@@ -189,6 +323,36 @@ fn interrupted_segmented_archives_resume_without_deleting_already_written_parts(
         restore::restore(&archive, &restored, false, t.path(), &NoEvents, &NoHooks).unwrap();
         assert_eq!(fs::read(restored).unwrap(), raw, "{point}");
     }
+}
+#[test]
+fn part_changed_during_final_flush_is_rejected_before_commit() {
+    struct Change(PathBuf);
+    impl Hooks for Change {
+        fn at(&self, point: &'static str) -> Result<()> {
+            if point == "after_final_storage_sync" {
+                let path = parts(&self.0).remove(0);
+                let file = fs::OpenOptions::new().write(true).open(&path)?;
+                file.set_len(file.metadata()?.len() + 1)?;
+            }
+            Ok(())
+        }
+    }
+    let t = tempfile::tempdir().unwrap();
+    let source = t.path().join("source");
+    let archive = t.path().join("archive");
+    fs::write(&source, bytes()).unwrap();
+    let error = backup::backup(
+        &source,
+        &archive,
+        plan(),
+        t.path(),
+        &NoEvents,
+        &Change(archive.clone()),
+        &AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "FILE_CHANGED");
+    assert!(!archive.join("COMMITTED").exists());
 }
 #[test]
 fn restore_target_cannot_alias_a_physical_part_through_an_external_hard_link() {

@@ -41,8 +41,8 @@ referenced parts are required together.
 ## Calibration and size limits
 
 The first physical part is at most 1 MiB, subject to the available-memory cap
-and an earlier logical-stream end. Measure its complete service time, including
-write, file/directory synchronization, BLAKE3 readback and descriptor persistence.
+and an earlier logical-stream end. Measure its cached service time, including
+queue wait, write acceptance, BLAKE3 readback and descriptor publication.
 Separate write/check timings, sample bytes and elapsed time are recorded.
 
 For measured sample bytes `B` and service seconds `T`, select:
@@ -53,6 +53,9 @@ baseline = align_down(clamp(B / max(T, 0.001) * 4 seconds,
 ```
 
 Four seconds provides margin toward the user's **soft five-second target**.
+This is cache-admission/checking latency, not measured physical-media bandwidth.
+Other initial parts can already be queued at the initial size while the first
+sample completes; calibration does not serialize the whole writer pipeline.
 The cap is at most 16 MiB per part and is lower on memory-limited plans. Keep
 this first-file baseline for the copy; do not waste another trial copy. A
 pending buffer is also flushed when its age reaches five seconds and the
@@ -68,9 +71,32 @@ existing no-progress supervisor and configured failure policy still apply.
 For each physical part:
 
 1. Compute BLAKE3 from the encoded bytes in RAM, before writing.
-2. Create a unique file, write and synchronize it and its directory.
+2. Create a unique file and write its bytes through the ordinary OS page cache.
 3. Read its complete bytes back, recompute BLAKE3 and compare the expected hash.
-4. Persist the descriptor mapping before acknowledging the logical checkpoint.
+4. Publish the descriptor mapping in source-stream order before acknowledging it.
+
+Two writer/checker threads consume a bounded queue of four parts. A slow first
+part does not prevent the second writer from working. Each stream's outstanding
+receipts are also bounded; out-of-order completions cannot create a hole in its
+published descriptor. The queue is fed without waiting for each individual part
+to finish, subject to available encoded data, memory, pause/cancel and error checks.
+
+During productive copying there is no per-part, per-descriptor or per-journal
+`fsync`. Persistent logs continue appending; their per-record/periodic durability
+sync is suspended during copying and forced on final/error close. This avoids
+another device flush from each progress record or log rotation.
+
+After all writers, checks, descriptors, indexes and journal updates are finished,
+perform one `syncfs` barrier before creating COMMITTED. Its filesystem descriptor
+is retained from **before** writes, so it can observe earlier writeback errors;
+opening a new descriptor only at the end could miss those errors. COMMITTED is
+then atomically written and its file/directory synced. A writeback EIO fails the
+copy and is never retried into apparent success. Log/session finalization and
+normal unmount still complete before the poweroff countdown.
+
+Intermediate accepted/checked bytes are not yet power-loss-durable. LiveISO does
+not automatically resume a copy after power loss. The ordinary-file development
+adapter retains explicit prefix recovery, without a new power-loss guarantee.
 
 There is **no decompression or original-data comparison during normal backup
 confirmation**. Matching stored bytes proves that the encoded data was retained;
@@ -90,13 +116,14 @@ not silently adopted by a new descriptor.
 
 ## Progress and controls
 
-The physical writer and its readback are currently serial: the reported write
-parallelism is **1**, independently of parallel source reads, compression and
-the bounded multicore BLAKE3 pool. This is the actual implementation, not an
-inferred CPU count.
+There are **two** physical-file writer/checker threads, independently of source
+read/encoder concurrency and the bounded multicore BLAKE3 pool. The UI reports
+both configured writer concurrency (2) and currently active writers (0–2).
+Startup, tails or insufficient input may use fewer than two active workers;
+dummy writes are not generated to fill an empty queue.
 
 GUI/CUI show the pending encoded block estimate, current file MB, baseline MB,
-writer concurrency, source MB/s and synced-write MB/s. Pending blocks are
+writer concurrency, source MB/s and cached-write MB/s. Pending blocks are
 `ceil((encoded queue + current input + pending storage buffers) / baseline)`;
 source *uncompressed* read bytes are not used in that division. Rates are recent
 one-second samples, not the initial RAM-prefetch rate averaged over the whole copy.
@@ -111,7 +138,7 @@ frame, so changing compression ratios and rounding do not distort or lose progre
 For example, 100 MB compressed to 10 MB earns 10 MB of source-equivalent progress
 when 1 MB is stored and checked. File headers/footers do not earn progress; a
 zero frame earns its source range when its payload-free frame header is checked.
-Credit is published after readback and descriptor persistence, never merely
+Credit is published after readback and descriptor publication, never merely
 because data is queued or written. Resume credits already checked prefixes once.
 This is a progress conversion, not a claim that partial compressed data has been
 decompressed and checked against the original. Actual compressed byte counts
@@ -121,17 +148,20 @@ completed bytes or extend the I/O deadline from a UI heartbeat alone.
 
 Only block completions, calibration and five-second wait milestones are mirrored
 to normal persistent logs; the 250 ms display samples do not each force another
-USB synchronization. Low-space checks, I/O retries, failure persistence and
+record. Low-space checks, I/O retries, failure persistence and
 pause/cancel handling remain enabled. Existing signed boot bytes, USB exclusions
 and NTFS dirty-volume refusal are unchanged.
 
 ## Limits and validation
 
-Staging, active-part receipts, decoder/encoder workspaces and the productive queue
+Staging, six queued/active part buffers, active-part receipts, encoder workspaces and the productive queue
 are reserved together. Each descriptor is at most 8 MiB and contains at most
 32,768 parts. Physical files remain below the product's 2,000,000,000-byte ceiling.
 
 Native ordinary-file tests cover split frames, exact restore, encoded-byte
-corruption, interrupted resume, retained part files, bounded calibration,
-pending-block arithmetic and observer activity during a held write. These are
+corruption, explicit interrupted recovery, retained part files, bounded calibration,
+pending-block arithmetic and two active held writers plus a queued part. An
+isolated Linux child traces the actual sync syscalls: no part/descriptor fsync,
+no per-progress/log-rotation flush, a final syncfs before COMMITTED, and failure
+without COMMITTED when that barrier returns EIO. These are
 software tests, not evidence of USB throughput or new VM/physical acceptance.

@@ -148,7 +148,17 @@ pub fn render(s: &Status, input: &Interaction, logs: &str) -> Result<String> {
             if let Some(p) = &s.snapshot {
                 for (key, n) in [
                     (T::Read, p.read_raw_bytes),
-                    (T::Durable, p.durable_raw_bytes),
+                    (
+                        T::Durable,
+                        if v.mode == crispawn_core::presentation::Mode::Backup {
+                            s.storage
+                                .as_ref()
+                                .map(|v| v.written_source_bytes)
+                                .unwrap_or(p.durable_raw_bytes)
+                        } else {
+                            p.durable_raw_bytes
+                        },
+                    ),
                     (
                         T::Confirmed,
                         if v.mode == crispawn_core::presentation::Mode::Backup {

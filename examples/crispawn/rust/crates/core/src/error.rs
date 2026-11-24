@@ -2,7 +2,7 @@
 // Copyright (c) 2026 bunbun-liveos contributors. Licensed under Apache-2.0.
 use std::{fmt, io};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Error {
     pub code: &'static str,
     pub detail: String,

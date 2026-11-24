@@ -547,7 +547,12 @@ impl<'a> View<'a> {
         self.subtitle.hidden(input.logs_open);
         let snap = s.snapshot.as_ref();
         let read = snap.map(|x| x.read_raw_bytes).unwrap_or(0);
-        let durable = snap.map(|x| x.durable_raw_bytes).unwrap_or(0);
+        let durable = if mode == Mode::Backup {
+            s.storage.as_ref().map(|v| v.written_source_bytes)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| snap.map(|x| x.durable_raw_bytes).unwrap_or(0));
         let verified = if mode == Mode::Backup {
             s.storage.as_ref().map(|v| v.confirmed_source_bytes)
         } else {

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 bunbun-digital. Licensed under Apache-2.0.
 //! Physical part files are independent of the PBK compression-frame boundaries.
-//! Acknowledgement requires fsync plus encoded-byte BLAKE3 readback, not decode.
+//! Parts are written/checked concurrently through the OS cache. Durability is
+//! established by the final filesystem barrier before COMMITTED, not per part.
 use crate::{io, parallel_hash::CpuPool, Error, Hooks, NoHooks, Result};
 use crispawn_core::{
     error::require,
@@ -11,13 +12,13 @@ use crispawn_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::{self, File},
     io::{Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        mpsc, Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -102,18 +103,23 @@ struct State {
     baseline: u64,
     proofs: BTreeMap<PathBuf, (String, SourceIdentity)>,
     files: BTreeMap<u64, (SourceIdentity, String)>,
+    active: BTreeMap<u64, (String, u64)>,
+    failure: Option<Error>,
 }
 pub(crate) struct Shared {
     pub pool: Arc<CpuPool>,
     id: String,
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
     pub source_read: AtomicU64,
     pub queue_bytes: AtomicU64,
-    pub cancelled: AtomicBool,
+    pub cancelled: Arc<AtomicBool>,
     done: AtomicBool,
     hooks: Arc<dyn Hooks>,
     capacity: u64,
     started: Instant,
+    writers: OnceLock<crate::storage_worker::Pool>,
+    next_job: AtomicU64,
+    destination: OnceLock<File>,
 }
 pub(crate) struct StopMonitor(pub Arc<Shared>);
 impl Drop for StopMonitor {
@@ -128,12 +134,15 @@ impl Shared {
             id: id.into(),
             source_read: AtomicU64::new(0),
             queue_bytes: AtomicU64::new(0),
-            cancelled: AtomicBool::new(false),
+            cancelled: Arc::new(AtomicBool::new(false)),
             done: AtomicBool::new(false),
             hooks: Arc::new(NoHooks),
             capacity: MAX,
             started: Instant::now(),
-            state: Mutex::new(State {
+            writers: OnceLock::new(),
+            next_job: AtomicU64::new(0),
+            destination: OnceLock::new(),
+            state: Arc::new(Mutex::new(State {
                 status: StorageStatus {
                     phase: "CALIBRATING".into(),
                     written_blocks: 0,
@@ -142,10 +151,12 @@ impl Shared {
                     queued_encoded_bytes: 0,
                     current_file_bytes: 0,
                     baseline_bytes: FIRST,
-                    write_workers: 1,
+                    write_workers: crate::storage_worker::WORKERS,
+                    active_write_workers: 0,
                     written_bytes: 0,
                     confirmed_bytes: 0,
                     confirmed_source_bytes: 0,
+                    written_source_bytes: 0,
                     phase_elapsed_ms: 0,
                     read_mb_per_second: 0.0,
                     write_mb_per_second: 0.0,
@@ -162,7 +173,9 @@ impl Shared {
                 baseline: FIRST,
                 proofs: BTreeMap::new(),
                 files: BTreeMap::new(),
-            }),
+                active: BTreeMap::new(),
+                failure: None,
+            })),
         }))
     }
     pub fn new_for_plan(id: &str, plan: &Plan) -> Result<Arc<Self>> {
@@ -176,6 +189,9 @@ impl Shared {
         Ok(shared)
     }
     fn check(&self) -> Result<()> {
+        if let Some(e) = &self.state.lock().unwrap_or_else(|e| e.into_inner()).failure {
+            return Err(e.clone());
+        }
         require(
             !self.cancelled.load(Ordering::Acquire),
             "CANCELLED",
@@ -190,9 +206,43 @@ impl Shared {
     }
     fn stage(&self, phase: &str, size: u64) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.active.is_empty() {
+            return;
+        }
         s.status.phase = phase.into();
         s.status.current_file_bytes = size;
         s.phase_since = Instant::now();
+    }
+    fn submit(&self, task: crate::storage_worker::Task) -> Result<()> {
+        if self.writers.get().is_none() {
+            let _ = self.writers.set(crate::storage_worker::Pool::new()?);
+        }
+        self.writers.get().unwrap().submit(task, || self.check())
+    }
+    pub fn bind_destination(&self, root: &Path) -> Result<()> {
+        // Keep this fd open from BEFORE copying: a newly opened fd at the end
+        // could miss earlier filesystem writeback errors already reported.
+        if self.destination.get().is_none() {
+            let file = File::open(root)?;
+            require(
+                file.metadata()?.is_dir(),
+                "INVALID_STATE",
+                "destination is not a directory",
+            )?;
+            let _ = self.destination.set(file);
+        }
+        Ok(())
+    }
+    pub fn final_sync(&self, _root: &Path) -> Result<()> {
+        self.check()?;
+        self.stage("FINAL_SYNC", 0);
+        io::sync_filesystem(
+            self.destination
+                .get()
+                .ok_or_else(|| Error::new("INVALID_STATE", "destination filesystem not bound"))?,
+        )?;
+        self.stage("READY", 0);
+        Ok(())
     }
     pub fn input(&self, bytes: u64) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).input = bytes;
@@ -200,6 +250,11 @@ impl Shared {
     pub fn credit_source(&self, bytes: u64) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.status.confirmed_source_bytes = s.status.confirmed_source_bytes.saturating_add(bytes);
+    }
+    pub fn seed_source(&self, bytes: u64) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.status.written_source_bytes += bytes;
+        s.status.confirmed_source_bytes += bytes;
     }
     fn buffered(&self, added: u64, removed: u64) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -347,6 +402,142 @@ impl Shared {
     }
 }
 
+#[derive(Clone)]
+struct WriteContext {
+    pool: Arc<CpuPool>,
+    state: Arc<Mutex<State>>,
+    cancelled: Arc<AtomicBool>,
+    hooks: Arc<dyn Hooks>,
+}
+impl WriteContext {
+    fn check(&self) -> Result<()> {
+        if let Some(e) = &self.state.lock().unwrap_or_else(|e| e.into_inner()).failure {
+            return Err(e.clone());
+        }
+        require(
+            !self.cancelled.load(Ordering::Acquire),
+            "CANCELLED",
+            "storage write cancelled",
+        )
+    }
+    fn phase(&self, job: u64, phase: &str, bytes: u64) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.active.insert(job, (phase.into(), bytes));
+        Self::refresh(&mut s);
+    }
+    fn refresh(s: &mut State) {
+        s.status.active_write_workers = s.active.len() as u32;
+        s.status.current_file_bytes = s.active.values().map(|v| v.1).max().unwrap_or(0);
+        let phase = if s.failure.is_some() {
+            "FAILED"
+        } else if s.active.values().any(|v| v.0 == "WRITING") {
+            "WRITING"
+        } else if s.active.is_empty() {
+            "READY"
+        } else {
+            "CHECKING"
+        };
+        if s.status.phase != phase {
+            s.phase_since = Instant::now();
+        }
+        s.status.phase = phase.into();
+    }
+    fn store(&self, job: u64, input: PartInput) -> Result<PartReceipt> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _deferred = io::DeferredSync::new(true);
+            self.check()?;
+            self.phase(job, "WRITING", input.bytes.len() as u64);
+            let started = Instant::now();
+            let expected = types::hex(&self.pool.hash(&input.bytes));
+            let directory = input.path.parent().unwrap();
+            for path in [directory.parent().unwrap(), directory] {
+                match fs::create_dir(path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        require(
+                            fs::symlink_metadata(path)?.is_dir(),
+                            "INVALID_STORAGE_PART",
+                            "storage directory is not an ordinary directory",
+                        )?;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            self.hooks.at("before_segment_write")?;
+            crate::destination_space::check(directory)?;
+            let mut file = io::create_new(&input.path)?;
+            io::write_all(&mut file, &input.bytes)?;
+            let write_ms = started.elapsed().as_millis() as u64;
+            {
+                let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                s.status.written_bytes += input.bytes.len() as u64;
+                s.status.written_source_bytes += input.source_bytes;
+                s.status.written_blocks += 1;
+                s.status.last_write_elapsed_ms = write_ms;
+            }
+            self.hooks.at("after_segment_write")?;
+            self.phase(job, "CHECKING", input.bytes.len() as u64);
+            let checking = Instant::now();
+            verify_part(&file, &expected, &self.pool, || self.check())?;
+            let check_ms = checking.elapsed().as_millis() as u64;
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .status
+                .last_check_elapsed_ms = check_ms;
+            Ok(PartReceipt {
+                identity: io::identity(&file)?,
+                path: input.path,
+                part: Part {
+                    path: input.relative,
+                    stream_offset: input.offset,
+                    bytes: input.bytes.len() as u64,
+                    used: input.bytes.len() as u64,
+                    blake3: expected,
+                },
+                source_bytes: input.source_bytes,
+                service_seconds: input.started.elapsed().as_secs_f64(),
+            })
+        }))
+        .unwrap_or_else(|_| {
+            Err(Error::new(
+                "STORAGE_WORKER_FAILED",
+                "storage writer panicked",
+            ))
+        });
+        if let Err(error) = &result {
+            crate::supervisor::failure(error);
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if s.failure.is_none() {
+                s.failure = Some(error.clone());
+            }
+            self.cancelled.store(true, Ordering::Release);
+        }
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.active.remove(&job);
+        Self::refresh(&mut s);
+        result
+    }
+}
+struct PartInput {
+    path: PathBuf,
+    relative: String,
+    offset: u64,
+    bytes: Vec<u8>,
+    source_bytes: u64,
+    started: Instant,
+}
+struct PartReceipt {
+    path: PathBuf,
+    part: Part,
+    identity: SourceIdentity,
+    source_bytes: u64,
+    service_seconds: f64,
+}
+struct PendingPart {
+    bytes: u64,
+    receiver: Mutex<mpsc::Receiver<Result<PartReceipt>>>,
+}
 pub(crate) struct DataFile {
     path: PathBuf,
     file: File,
@@ -357,6 +548,8 @@ pub(crate) struct DataFile {
     shared: Option<Arc<Shared>>,
     last_flush: Instant,
     dirty: bool,
+    pending: VecDeque<PendingPart>,
+    pending_bytes: u64,
 }
 pub(crate) struct FileMetadata(u64);
 impl FileMetadata {
@@ -438,9 +631,14 @@ impl DataFile {
             shared: None,
             last_flush: Instant::now(),
             dirty: false,
+            pending: VecDeque::new(),
+            pending_bytes: 0,
         })
     }
     pub fn open_owned(path: &Path, segmented: bool, shared: Arc<Shared>) -> Result<Self> {
+        if segmented {
+            shared.bind_destination(path.parent().unwrap())?;
+        }
         let mut v = Self::read(path, segmented)?;
         v.file = crate::v2::open_owned(path)?;
         if segmented {
@@ -457,6 +655,9 @@ impl DataFile {
         id: u64,
         shared: Arc<Shared>,
     ) -> Result<Self> {
+        if plan.segmented_storage {
+            shared.bind_destination(path.parent().unwrap())?;
+        }
         let file = io::create_new(path)?;
         let manifest = if plan.segmented_storage {
             Some(Manifest {
@@ -480,6 +681,8 @@ impl DataFile {
             shared: Some(shared),
             last_flush: Instant::now(),
             dirty: plan.segmented_storage,
+            pending: VecDeque::new(),
+            pending_bytes: 0,
         };
         if plan.segmented_storage {
             v.persist()?;
@@ -488,7 +691,7 @@ impl DataFile {
     }
     pub fn metadata(&self) -> Result<FileMetadata> {
         Ok(FileMetadata(match &self.manifest {
-            Some(m) => m.bytes + self.buffer.len() as u64,
+            Some(m) => m.bytes + self.pending_bytes + self.buffer.len() as u64,
             None => self.file.metadata()?.len(),
         }))
     }
@@ -499,6 +702,7 @@ impl DataFile {
     }
     fn persist(&mut self) -> Result<()> {
         if self.dirty {
+            let _deferred = io::DeferredSync::new(true);
             let m = self.manifest.as_ref().unwrap();
             m.validate()?;
             let bytes = io::json(m)?;
@@ -517,107 +721,143 @@ impl DataFile {
         }
         Ok(())
     }
+    fn receive_part(&mut self, wait: bool) -> Result<bool> {
+        let Some(pending) = self.pending.front() else {
+            return Ok(false);
+        };
+        let shared = self.shared.as_ref().unwrap().clone();
+        let result = if wait {
+            loop {
+                match pending
+                    .receiver
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .recv_timeout(Duration::from_millis(25))
+                {
+                    Ok(v) => break v,
+                    Err(mpsc::RecvTimeoutError::Timeout) => shared.check()?,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(Error::new(
+                            "STORAGE_WORKER_FAILED",
+                            "part completion disconnected",
+                        ))
+                    }
+                }
+            }
+        } else {
+            match pending
+                .receiver
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .try_recv()
+            {
+                Ok(v) => v,
+                Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(Error::new(
+                        "STORAGE_WORKER_FAILED",
+                        "part completion disconnected",
+                    ))
+                }
+            }
+        };
+        let completed = result?;
+        let pending = self.pending.pop_front().unwrap();
+        let size = pending.bytes;
+        let m = self.manifest.as_mut().unwrap();
+        require(
+            completed.part.stream_offset == m.bytes && completed.part.bytes == size,
+            "INVALID_STORAGE_PART",
+            "out-of-order part publication",
+        )?;
+        shared.proof(
+            &completed.path,
+            &completed.part.blake3,
+            completed.identity,
+            true,
+        );
+        m.bytes += size;
+        m.parts.push(completed.part);
+        self.pending_bytes -= size;
+        self.dirty = true;
+        shared.stage("SAVING_METADATA", size);
+        let started = Instant::now();
+        self.persist()?;
+        shared.credit_source(completed.source_bytes);
+        shared.buffered(0, size);
+        shared.calibrate(
+            size,
+            completed.service_seconds + started.elapsed().as_secs_f64(),
+        );
+        shared.stage("READY", 0);
+        Ok(true)
+    }
+    pub fn poll(&mut self) -> Result<()> {
+        while self.receive_part(false)? {}
+        if self.due() {
+            self.flush_part()?;
+        }
+        Ok(())
+    }
     fn flush_part(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
         }
+        while self.receive_part(false)? {}
+        // Bound per-stream completion receipts even if its first write is slow.
+        while self.pending.len()
+            >= crate::storage_worker::QUEUED + crate::storage_worker::WORKERS as usize
+        {
+            self.receive_part(true)?;
+        }
         let shared = self.shared.as_ref().unwrap().clone();
         shared.check()?;
-        let started = Instant::now();
+        let m = self.manifest.as_ref().unwrap();
+        require(
+            m.parts.len() + self.pending.len() < MAX_PARTS,
+            "LIMIT_EXCEEDED",
+            "too many storage parts",
+        )?;
+        let relative = format!(
+            "segments/{:08x}/{}.bin",
+            m.file_id,
+            types::hex(&io::new_id()?)
+        );
         let bytes = std::mem::take(&mut self.buffer);
         let size = bytes.len() as u64;
-        let result = (|| -> Result<()> {
-            let expected = types::hex(&shared.pool.hash(&bytes));
-            let m = self.manifest.as_ref().unwrap();
-            require(
-                m.parts.len() < MAX_PARTS,
-                "LIMIT_EXCEEDED",
-                "too many storage parts",
-            )?;
-            let directory = self.parent().join(format!("segments/{:08x}", m.file_id));
-            let base = self.parent().join("segments");
-            for p in [&base, &directory] {
-                match fs::create_dir(p) {
-                    Ok(()) => io::sync_dir(p.parent().unwrap())?,
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        require(
-                            fs::symlink_metadata(p)?.is_dir(),
-                            "INVALID_STORAGE_PART",
-                            "part directory is not an ordinary directory",
-                        )?;
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            let relative = format!(
-                "segments/{:08x}/{}.bin",
-                m.file_id,
-                types::hex(&io::new_id()?)
-            );
-            let path = self.parent().join(&relative);
-            shared.stage("WRITING", size);
-            let write_started = Instant::now();
-            shared.hooks.at("before_segment_write")?;
-            crate::destination_space::check(self.parent())?;
-            let mut file = io::create_new(&path)?;
-            io::write_all(&mut file, &bytes)?;
-            shared.stage("SYNCING", size);
-            io::sync_file(&file)?;
-            io::sync_dir(&directory)?;
-            {
-                let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
-                s.status.written_bytes += size;
-                s.status.written_blocks += 1;
-            }
-            shared.hooks.at("after_segment_sync")?;
-            shared
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .status
-                .last_write_elapsed_ms = write_started.elapsed().as_millis() as u64;
-            shared.stage("CHECKING", size);
-            let check_started = Instant::now();
-            verify_part(&file, &expected, &shared.pool, || shared.check())?;
-            shared
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .status
-                .last_check_elapsed_ms = check_started.elapsed().as_millis() as u64;
-            shared.proof(&path, &expected, io::identity(&file)?, true);
-            let m = self.manifest.as_mut().unwrap();
-            m.parts.push(Part {
-                path: relative,
-                stream_offset: m.bytes,
-                bytes: size,
-                used: size,
-                blake3: expected,
-            });
-            m.bytes += size;
-            self.dirty = true;
-            shared.stage("SAVING_METADATA", size);
-            self.persist()?;
-            // Only a synced, checked part with a persisted mapping earns credit.
-            shared.credit_source(self.buffer_source_bytes);
-            self.buffer_source_bytes = 0;
-            shared.calibrate(size, started.elapsed().as_secs_f64());
-            shared.buffered(0, size);
-            self.last_flush = Instant::now();
-            shared.stage("READY", 0);
-            Ok(())
-        })();
-        if result.is_err() {
-            self.buffer = bytes;
-        } else {
-            self.buffer = bytes;
-            self.buffer.clear();
-        }
-        result
+        let input = PartInput {
+            path: self.parent().join(&relative),
+            relative,
+            offset: m.bytes + self.pending_bytes,
+            bytes,
+            source_bytes: self.buffer_source_bytes,
+            started: Instant::now(),
+        };
+        let context = WriteContext {
+            pool: shared.pool.clone(),
+            state: shared.state.clone(),
+            cancelled: shared.cancelled.clone(),
+            hooks: shared.hooks.clone(),
+        };
+        let job = shared.next_job.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        shared.submit(Box::new(move || {
+            let _ = sender.send(context.store(job, input));
+        }))?;
+        self.pending.push_back(PendingPart {
+            bytes: size,
+            receiver: Mutex::new(receiver),
+        });
+        self.pending_bytes += size;
+        self.buffer_source_bytes = 0;
+        self.last_flush = Instant::now();
+        shared.stage("QUEUED", size);
+        Ok(())
     }
     pub fn sync(&mut self) -> Result<()> {
         if self.manifest.is_some() {
             self.flush_part()?;
+            while self.receive_part(true)? {}
             self.persist()
         } else {
             io::sync_file(&self.file)
@@ -635,6 +875,7 @@ impl DataFile {
             "INVALID_STATE",
             "segmented writes must append",
         )?;
+        self.poll()?;
         let shared = self.shared.as_ref().unwrap().clone();
         let total = bytes.len() as u64;
         let mut processed = 0u64;
@@ -664,6 +905,11 @@ impl DataFile {
         Ok(())
     }
     pub fn set_len(&mut self, len: u64) -> Result<()> {
+        require(
+            self.pending.is_empty(),
+            "INVALID_STATE",
+            "truncate has pending writes",
+        )?;
         if let Some(m) = &mut self.manifest {
             require(
                 len <= m.bytes,
@@ -835,7 +1081,7 @@ pub(crate) fn write_frame(
 mod tests {
     use super::*;
     #[test]
-    fn first_file_calibration_is_bounded_and_accounts_for_sync_and_readback() {
+    fn first_file_calibration_is_bounded_for_cached_write_and_readback() {
         assert_eq!(Shared::calibrated_size(1 << 20, 4.0), 1 << 20);
         assert_eq!(Shared::calibrated_size(1 << 20, 1000.0), MIN);
         assert_eq!(Shared::calibrated_size(1 << 20, 0.001), MAX);
@@ -852,6 +1098,7 @@ mod tests {
         let encoded = vec![7; (2 << 20) + 13];
         let raw = 100_000_007;
         f.write_with_source(&encoded, raw).unwrap();
+        while f.receive_part(true).unwrap() {}
         let partial = s.snapshot();
         assert_eq!(partial.confirmed_bytes, 2 << 20);
         assert_eq!(
@@ -976,7 +1223,7 @@ mod tests {
         struct Corrupt(PathBuf);
         impl Hooks for Corrupt {
             fn at(&self, p: &'static str) -> Result<()> {
-                if p == "after_segment_sync" {
+                if p == "after_segment_write" {
                     let directory = self.0.join("segments/00000000");
                     let file = fs::read_dir(directory)?.next().unwrap()?.path();
                     use std::os::unix::fs::FileExt;
@@ -1004,12 +1251,8 @@ mod tests {
             s.clone(),
         )
         .unwrap();
-        assert_eq!(
-            f.write_with_source(&vec![7; 1 << 20], 100_000_000)
-                .unwrap_err()
-                .code,
-            "STORED_HASH_MISMATCH"
-        );
+        f.write_with_source(&vec![7; 1 << 20], 100_000_000).unwrap();
+        assert_eq!(f.sync().unwrap_err().code, "STORED_HASH_MISMATCH");
         assert_eq!(s.snapshot().confirmed_blocks, 0);
         assert_eq!(s.snapshot().confirmed_source_bytes, 0);
         assert!(DataFile::read(&f.path, true)
@@ -1020,7 +1263,7 @@ mod tests {
             .is_empty());
     }
     #[test]
-    fn storage_observer_keeps_reporting_wait_time_while_writer_is_held() {
+    fn two_writers_and_a_queued_part_stay_active_while_observer_reports_wait_time() {
         use std::sync::{atomic::AtomicUsize, Condvar};
         struct Hold(Arc<(Mutex<bool>, Condvar)>);
         impl Hooks for Hold {
@@ -1047,6 +1290,9 @@ mod tests {
                 if s.phase == "WRITING" && s.phase_elapsed_ms >= 100 {
                     assert_eq!(s.written_bytes, 0);
                     assert_eq!(s.confirmed_bytes, 0);
+                    assert_eq!(s.write_workers, 2);
+                    assert_eq!(s.active_write_workers, 2);
+                    assert!(s.waiting_blocks >= 3);
                     self.0.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -1074,7 +1320,7 @@ mod tests {
             let _stop = StopMonitor(shared.clone());
             scope.spawn(|| shared.monitor(&events, &control));
             let worker = scope.spawn(|| {
-                file.write_all(&[9; 1000])?;
+                file.write_all(&vec![9; 3 << 20])?;
                 file.sync()
             });
             let deadline = Instant::now() + Duration::from_secs(1);
@@ -1087,10 +1333,9 @@ mod tests {
             assert!(events.0.load(Ordering::Relaxed) >= 2);
             let status = shared.snapshot();
             assert!(status.calibrated);
-            assert_eq!(status.calibration_bytes, 1000);
+            assert_eq!(status.calibration_bytes, 1 << 20);
             assert!(status.calibration_elapsed_ms >= 250);
-            assert!(status.last_write_elapsed_ms >= 250);
-            assert_eq!(status.baseline_bytes, MIN);
+            assert!((MIN..=MAX).contains(&status.baseline_bytes));
         });
     }
 }

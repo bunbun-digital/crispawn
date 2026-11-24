@@ -28,6 +28,7 @@ pub mod probe;
 pub mod profiles;
 pub mod restore;
 mod storage;
+mod storage_worker;
 pub mod supervisor;
 pub mod terminal;
 mod uefi_diagnostics;

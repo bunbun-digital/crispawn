@@ -67,7 +67,7 @@ for the locations of embedded settings and supported-feature information.
 | `startup` | `auto_copy`, `menu`, or `restore_select`; standard: `auto_copy` after 30 seconds; GUI delay: 0–300 seconds |
 | `ui` | `gui`, `console`, or `headless`; language `ja` or `en`; standard: Japanese GUI |
 | `processing` | Automatic selection of read size, compression and concurrency; standard initial profile: `balanced` |
-| `logging` | `always`, `on_error`, or `never`; standard: continuously sync logs to the backup destination, with `sync_interval_ms: 0` |
+| `logging` | `always`, `on_error`, or `never`; standard: continuously write logs to the backup destination; copy-time durability sync is batched until finalization |
 | `completion` | `poweroff` after 0–60 seconds, or `stay`; standard: poweroff after 5 seconds |
 | `failure` | Optional `poweroff` or `stay`; standard: poweroff using the completion delay, or 5 seconds if normal completion is `stay` |
 | `network` | Community requires `mode: "none"`; shared schemas containing remote-storage types do not enable them |
@@ -106,9 +106,10 @@ the expected path. See [the USB file layout specification](docs/COMPATIBILITY.md
    compressed size depends on the actual bytes, not the filesystem's used-space count.
 4. **Progress and control:** the UI shows percent, bytes and GB, ETA, read size,
    compression/level and concurrency. Pause/resume is available; cancellation
-   requires confirmation. The first stored part measures destination service speed
+   requires confirmation. The first stored part measures cached write/check latency
    and sets a baseline file size toward a soft five-second target. The UI also
-   shows queued write blocks, current file MB, writer concurrency and read/write MB/s.
+   shows queued write blocks, current file MB, configured/active writer concurrency
+   and read/write MB/s. At least two writer slots are provided; active use depends on available data.
    Each stored part is reread and checked by compressed-byte BLAKE3 while copying
    continues; backup confirmation does not decompress the data.
 5. **Restore:** a saved date/session, source disk from that set and destination
@@ -116,7 +117,9 @@ the expected path. See [the USB file layout specification](docs/COMPATIBILITY.md
    length. Restoring overwrites the selected target and checks restored ranges
    by reading them back while further ranges are restored.
 6. **Completion:** success is shown only after all selected work and checks
-   finish. There is no separate verification stage. With poweroff enabled,
+   finish, including the final storage synchronization. Copying does not wait for
+   a physical-media sync after every file. There is no separate verification stage.
+   Automatic resume after power loss is not supported. With poweroff enabled,
    the completion message includes the remaining shutdown time before normal shutdown.
 
 A backup destination may be smaller than the source disk if compressed data

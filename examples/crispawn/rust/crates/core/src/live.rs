@@ -38,11 +38,15 @@ pub struct StorageStatus {
     pub current_file_bytes: u64,
     pub baseline_bytes: u64,
     pub write_workers: u32,
+    #[serde(default)]
+    pub active_write_workers: u32,
     pub written_bytes: u64,
     pub confirmed_bytes: u64,
     /// Source-byte equivalent of checked compressed payloads, for progress only.
     #[serde(default)]
     pub confirmed_source_bytes: u64,
+    #[serde(default)]
+    pub written_source_bytes: u64,
     pub phase_elapsed_ms: u64,
     pub read_mb_per_second: f64,
     pub write_mb_per_second: f64,
