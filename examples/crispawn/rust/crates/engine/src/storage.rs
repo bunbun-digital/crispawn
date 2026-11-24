@@ -120,6 +120,7 @@ pub(crate) struct Shared {
     writers: OnceLock<crate::storage_worker::Pool>,
     next_job: AtomicU64,
     destination: OnceLock<File>,
+    verify_after_write: AtomicBool,
 }
 pub(crate) struct StopMonitor(pub Arc<Shared>);
 impl Drop for StopMonitor {
@@ -142,6 +143,7 @@ impl Shared {
             writers: OnceLock::new(),
             next_job: AtomicU64::new(0),
             destination: OnceLock::new(),
+            verify_after_write: AtomicBool::new(true),
             state: Arc::new(Mutex::new(State {
                 status: StorageStatus {
                     phase: "CALIBRATING".into(),
@@ -247,14 +249,25 @@ impl Shared {
     pub fn input(&self, bytes: u64) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).input = bytes;
     }
+    pub fn set_write_verification(&self, enabled: bool) {
+        self.verify_after_write.store(enabled, Ordering::Relaxed);
+    }
+    pub fn verifies_writes(&self) -> bool {
+        self.verify_after_write.load(Ordering::Relaxed)
+    }
     pub fn credit_source(&self, bytes: u64) {
+        if !self.verifies_writes() {
+            return;
+        }
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.status.confirmed_source_bytes = s.status.confirmed_source_bytes.saturating_add(bytes);
     }
     pub fn seed_source(&self, bytes: u64) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.status.written_source_bytes += bytes;
-        s.status.confirmed_source_bytes += bytes;
+        if self.verifies_writes() {
+            s.status.confirmed_source_bytes += bytes;
+        }
     }
     fn buffered(&self, added: u64, removed: u64) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -264,8 +277,10 @@ impl Shared {
     fn proof(&self, path: &Path, hash: &str, identity: SourceIdentity, new_write: bool) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !s.proofs.contains_key(path) {
-            s.status.confirmed_bytes += identity.bytes;
-            s.status.confirmed_blocks += 1;
+            if self.verifies_writes() {
+                s.status.confirmed_bytes += identity.bytes;
+                s.status.confirmed_blocks += 1;
+            }
             if !new_write {
                 s.status.written_bytes += identity.bytes;
                 s.status.written_blocks += 1;
@@ -408,6 +423,7 @@ struct WriteContext {
     state: Arc<Mutex<State>>,
     cancelled: Arc<AtomicBool>,
     hooks: Arc<dyn Hooks>,
+    verify_after_write: bool,
 }
 impl WriteContext {
     fn check(&self) -> Result<()> {
@@ -476,10 +492,14 @@ impl WriteContext {
                 s.status.last_write_elapsed_ms = write_ms;
             }
             self.hooks.at("after_segment_write")?;
-            self.phase(job, "CHECKING", input.bytes.len() as u64);
-            let checking = Instant::now();
-            verify_part(&file, &expected, &self.pool, || self.check())?;
-            let check_ms = checking.elapsed().as_millis() as u64;
+            let check_ms = if self.verify_after_write {
+                self.phase(job, "CHECKING", input.bytes.len() as u64);
+                let checking = Instant::now();
+                verify_part(&file, &expected, &self.pool, || self.check())?;
+                checking.elapsed().as_millis() as u64
+            } else {
+                0
+            };
             self.state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -834,6 +854,7 @@ impl DataFile {
             started: Instant::now(),
         };
         let context = WriteContext {
+            verify_after_write: shared.verifies_writes(),
             pool: shared.pool.clone(),
             state: shared.state.clone(),
             cancelled: shared.cancelled.clone(),

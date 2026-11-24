@@ -10,6 +10,9 @@ use std::time::Duration;
 
 pub trait ExecutionControl: Send + Sync {
     fn cancelled(&self) -> bool;
+    fn verify_after_write(&self) -> bool {
+        true
+    }
     fn verification_workers(&self) -> u32 {
         1
     }
@@ -79,6 +82,7 @@ pub struct RunControl {
     pause: Mutex<bool>,
     wake: Condvar,
     verification_workers: AtomicU32,
+    verify_after_write: AtomicBool,
 }
 impl Default for RunControl {
     fn default() -> Self {
@@ -92,6 +96,7 @@ impl RunControl {
             pause: Mutex::new(false),
             wake: Condvar::new(),
             verification_workers: AtomicU32::new(1),
+            verify_after_write: AtomicBool::new(true),
         }
     }
     pub fn cancel(&self) {
@@ -102,6 +107,9 @@ impl RunControl {
         self.verification_workers
             .store(workers.clamp(1, 32), Ordering::Relaxed);
     }
+    pub fn set_backup_verification(&self, enabled: bool) {
+        self.verify_after_write.store(enabled, Ordering::Relaxed);
+    }
     pub fn pause(&self) {
         *self.pause.lock().unwrap_or_else(|e| e.into_inner()) = true;
     }
@@ -111,6 +119,9 @@ impl RunControl {
     }
 }
 impl ExecutionControl for RunControl {
+    fn verify_after_write(&self) -> bool {
+        self.verify_after_write.load(Ordering::Relaxed)
+    }
     fn configure_verification_workers(&self, workers: u32) {
         self.set_verification_workers(workers);
     }

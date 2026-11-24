@@ -57,6 +57,20 @@ pub struct StorageStatus {
     pub last_write_elapsed_ms: u64,
     pub last_check_elapsed_ms: u64,
 }
+/// KiB from one /proc/meminfo sample; byte limits describe application RAM.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryStatus {
+    pub total_kib: u64,
+    pub available_kib: u64,
+    pub cached_kib: u64,
+    pub dirty_kib: u64,
+    pub writeback_kib: u64,
+    pub anonymous_kib: u64,
+    pub processing_limit_bytes: u64,
+    pub encoded_queue_bytes: u64,
+    pub encoded_queue_limit_bytes: u64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Status {
@@ -69,6 +83,10 @@ pub struct Status {
     pub progress_age_ms: u64,
     pub rss_kib: u64,
     pub memory_available_kib: u64,
+    #[serde(default)]
+    pub memory: Option<MemoryStatus>,
+    #[serde(default = "enabled")]
+    pub backup_verification_enabled: bool,
     pub log_dropped: u64,
     #[serde(default)]
     pub io_retries: u64,
@@ -132,6 +150,8 @@ impl Status {
             progress_age_ms: 0,
             rss_kib: 0,
             memory_available_kib: 0,
+            memory: None,
+            backup_verification_enabled: true,
             log_dropped: 0,
             io_retries: 0,
             boot_uuid: String::new(),
@@ -184,6 +204,9 @@ impl Status {
 fn one_verifier() -> u32 {
     1
 }
+fn enabled() -> bool {
+    true
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandAction {
@@ -225,12 +248,16 @@ mod tests {
             "log_destination",
             "finalization_complete",
             "shutdown_countdown_seconds",
+            "memory",
+            "backup_verification_enabled",
         ] {
             value.as_object_mut().unwrap().remove(key);
         }
         let old: Status = serde_json::from_value(value).unwrap();
         assert!(old.backup_destination.is_none());
         assert!(!old.finalization_complete);
+        assert!(old.memory.is_none());
+        assert!(old.backup_verification_enabled);
         assert_eq!(old.job_id, "old-run");
         assert_eq!(old.phase, "STARTING");
     }

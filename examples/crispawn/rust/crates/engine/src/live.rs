@@ -1016,7 +1016,14 @@ pub fn run() -> Result<()> {
                     s.heartbeat += 1;
                     s.io_retries = io::retry_count();
                     s.rss_kib = metric("/proc/self/status", "VmRSS:");
-                    s.memory_available_kib = metric("/proc/meminfo", "MemAvailable:");
+                    let mut memory = crate::memory::sample();
+                    if let Some(old) = &s.memory {
+                        memory.processing_limit_bytes = old.processing_limit_bytes;
+                        memory.encoded_queue_bytes = old.encoded_queue_bytes;
+                        memory.encoded_queue_limit_bytes = old.encoded_queue_limit_bytes;
+                    }
+                    s.memory_available_kib = memory.available_kib;
+                    s.memory = Some(memory);
                     s.active_vt = active_vt();
                     s.gui_ready = io::read_json::<serde_json::Value>(&root.join("ui.json"))
                         .map(|value| ui_fresh(&value, diag.ms()))
@@ -1034,6 +1041,10 @@ pub fn run() -> Result<()> {
                     let _ = io::atomic_write(root, "status.json", &bytes);
                 }
                 if count % 4 == 0 {
+                    diag.record(
+                        "memory_sample",
+                        json!({"rss_kib":status.rss_kib,"memory":status.memory}),
+                    );
                     let _ = tx.try_send(format!(
                         "PB_PROBE {}",
                         serde_json::to_string(&status.probe_projection()).unwrap()
@@ -1450,15 +1461,25 @@ fn run_inner(
         available,
         config.version == 2 && config.tuning.mode == crate::job_config::TuningMode::Auto,
     );
+    diag.status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .memory
+        .get_or_insert_with(Default::default)
+        .processing_limit_bytes = config.tuning.plan.memory_limit_bytes;
     diag.record("memory_budget", json!({"available_bytes":available.to_string(),
         "processing_limit_bytes":config.tuning.plan.memory_limit_bytes.to_string(),
         "os_headroom_bytes":available.saturating_sub(config.tuning.plan.memory_limit_bytes).to_string()}));
+    diag.status
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .backup_verification_enabled = config.tuning.verify_after_write;
     diag.record(
         "device_discovery",
         json!({"devices":devices,"excluded_whole_disk":mount.device.whole_name}),
     );
     diag.record("runtime_configured", json!({"runtime_version":config.version,"startup":config.startup,"ui_mode":config.interface,"log_policy":config.log_policy,"volume":config.volume,
-        "io_policy":config.tuning.io_policy,
+        "io_policy":config.tuning.io_policy,"verify_after_write":config.tuning.verify_after_write,
         "failure":{"poweroff":config.poweroff_on_failure,"delay_seconds":config.completion_seconds}}));
     let mut frontends = start_frontends(config.interface, diag)?;
     let mut network = crate::connection::Local;

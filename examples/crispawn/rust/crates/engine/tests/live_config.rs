@@ -52,6 +52,20 @@ fn example(name: &str) -> Value {
 fn baseline() -> Value {
     example("live-v2-usb.json")
 }
+#[test]
+fn write_verification_defaults_on_and_can_be_explicitly_disabled() {
+    assert!(parse(&baseline()).tuning.verify_after_write);
+    let mut value = baseline();
+    value["processing"]["verify_after_write"] = json!(false);
+    assert!(!parse(&value).tuning.verify_after_write);
+    assert!(Settings::capability_names()
+        .iter()
+        .any(|v| v == "processing.verify_after_write"));
+    for invalid in [json!(0), json!("false"), Value::Null] {
+        value["processing"]["verify_after_write"] = invalid;
+        rejected(&value);
+    }
+}
 fn parse(value: &Value) -> Settings {
     live_config::parse(&serde_json::to_vec(value).unwrap()).unwrap()
 }

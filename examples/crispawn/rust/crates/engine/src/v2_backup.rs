@@ -212,7 +212,9 @@ fn seal(
             entry.file_id,
             entry.storage_descriptor_blake3.as_ref().unwrap(),
         )?;
-        report.verified += entry.source_length_bytes;
+        if storage.verifies_writes() {
+            report.verified += entry.source_length_bytes;
+        }
     }
     report.stored += format::FOOTER as u64;
     hooks.at("after_seal")?;
@@ -652,6 +654,12 @@ fn run(
     storage: std::sync::Arc<storage::Shared>,
 ) -> Result<verify::Report> {
     let pool = storage.pool.clone();
+    require(
+        control.verify_after_write() || plan.segmented_storage,
+        "INVALID_CONFIG",
+        "disabling copy write verification requires segmented storage",
+    )?;
+    storage.set_write_verification(control.verify_after_write());
     if plan.segmented_storage {
         storage.bind_destination(root)?;
     }
@@ -729,7 +737,11 @@ fn run_inner(
     let mut next_file = journal.state.used.last().map(|v| v + 1).unwrap_or(0);
     let mut report = Reporter::new(events, meta.backup_id.clone(), meta.source.bytes);
     if plan.segmented_storage {
-        report.verification_kind = "compressed_blake3";
+        report.verification_kind = if control.verify_after_write() {
+            "compressed_blake3"
+        } else {
+            "skipped"
+        };
     }
     report.durable = journal
         .state
@@ -780,7 +792,9 @@ fn run_inner(
                 entry.file_id,
                 entry.storage_descriptor_blake3.as_ref().unwrap(),
             )?;
-            report.verified += entry.source_length_bytes;
+            if storage.verifies_writes() {
+                report.verified += entry.source_length_bytes;
+            }
         } else {
             verification.submit(entry.clone(), &mut report, control)?;
         }
@@ -1094,7 +1108,12 @@ fn run_inner(
             storage.matches(root, &verified.files)?
         } else {
             verification.matches(root, &verified.files)?
-        }) && report.verified == meta.source.bytes,
+        }) && report.verified
+            == if control.verify_after_write() {
+                meta.source.bytes
+            } else {
+                0
+            },
         "MISSING_VERIFICATION",
         "not every indexed sealed file passed concurrent verification",
     )?;
@@ -1128,10 +1147,11 @@ fn run_inner(
         )?;
         crate::destination_space::check(root)?;
     }
-    v2::write_commit(root, &meta.backup_id)?;
+    v2::write_commit_with_verification(root, &meta.backup_id, control.verify_after_write())?;
     hooks.at("after_commit")?;
     report.emit("COMPLETE", "BACKUP_COMMITTED");
     let mut result = verified.report();
+    result.verification_kind = report.verification_kind.into();
     result.operation = "backup".into();
     Ok(result)
 }

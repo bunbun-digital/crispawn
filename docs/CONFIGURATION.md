@@ -14,6 +14,21 @@ Schemas describe shared wire types; schema validity alone never enables a backen
 - The actual free-space cutoff is 1,000,000,000 bytes. No source-capacity reservation
   or consumption/progress forecast is used.
 - `logging.policy`: `always`, `on_error`, or `never`. Logs use the backup destination.
+- `processing.verify_after_write`: optional boolean, default `true`. Set `false`
+  to skip reading back newly written compressed copy parts. BLAKE3 hashes are
+  still computed before writing and recorded for later verification/restoration.
+  Final filesystem synchronization remains mandatory. This option applies to
+  copying; restore target verification remains enabled. The GUI/CUI explicitly
+  displays that checks were skipped, with no confirmed-byte credit. The archive
+  commit and job report record `verification_kind: "skipped"`; this is a complete
+  but unchecked copy, not a verified backup. Use this or a compatible newer ISO
+  to restore such archives. Older settings omitting the field retain checks.
+
+For example, add `"verify_after_write": false` inside the existing `processing`
+object, alongside `mode`, `initial_profile` and `io_policy`. A complete example
+is `config/crispawn/examples/live-v2-no-verify.json`. Builder can inspect the
+`processing.verify_after_write` capability before adding the field. Older ISOs
+must not be sent this new field or treated as supporting it.
 
 During copying, enabled logs are appended continuously through the OS cache.
 Per-record/periodic durability sync is deferred until final/error close, including

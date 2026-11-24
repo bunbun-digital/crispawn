@@ -147,6 +147,24 @@ impl Reader for File {
         FileExt::read_at(self, b, o)
     }
 }
+/// Source ranges are consumed once and already owned in RAM after read_exact_at.
+/// Hint that their clean cached pages need not compete with destination cache.
+/// This best-effort hint never syncs, changes data or operates on output files.
+pub(crate) fn release_source_cache(source: &File, offset: u64, length: u64) {
+    if length == 0 || offset > i64::MAX as u64 || length > i64::MAX as u64 {
+        return;
+    }
+    // SAFETY: source owns the descriptor and the positive span fits off_t.
+    // Advice may be unsupported or ignored, so it cannot fail the copy.
+    let _ = unsafe {
+        libc::posix_fadvise(
+            source.as_raw_fd(),
+            offset as libc::off_t,
+            length as libc::off_t,
+            libc::POSIX_FADV_DONTNEED,
+        )
+    };
+}
 pub fn read_exact_at(
     reader: &dyn Reader,
     mut buffer: &mut [u8],

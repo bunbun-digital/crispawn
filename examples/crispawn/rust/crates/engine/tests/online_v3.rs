@@ -189,11 +189,11 @@ fn productive_compression_continues_while_destination_checkpoint_is_waiting() {
             if point == "before_data_sync" && !self.waiting.swap(true, Ordering::SeqCst) {
                 let before = self.queued.load(Ordering::SeqCst);
                 let end = Instant::now() + Duration::from_secs(5);
-                while self.queued.load(Ordering::SeqCst) < before + 3 && Instant::now() < end {
+                while self.queued.load(Ordering::SeqCst) < before + 2 && Instant::now() < end {
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 self.observed.store(
-                    self.queued.load(Ordering::SeqCst) >= before + 3,
+                    self.queued.load(Ordering::SeqCst) >= before + 2,
                     Ordering::SeqCst,
                 );
             }

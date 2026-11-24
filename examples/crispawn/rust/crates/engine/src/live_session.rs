@@ -700,7 +700,9 @@ pub(super) fn execute(
             .map(|d| d.bytes)
             .unwrap_or(source.size_bytes);
         session.view.previous_durable_bytes += bytes;
-        session.view.previous_verified_bytes += bytes;
+        if restore.is_some() || config.tuning.verify_after_write {
+            session.view.previous_verified_bytes += bytes;
+        }
         session.view.previous_elapsed_seconds += diag
             .snapshot()
             .snapshot
@@ -732,7 +734,9 @@ pub(super) fn execute(
         .map(|d| d.bytes)
         .unwrap_or_else(|| sources[*indices.last().unwrap()].size_bytes);
     session.view.previous_durable_bytes -= last_bytes;
-    session.view.previous_verified_bytes -= last_bytes;
+    if restore.is_some() || config.tuning.verify_after_write {
+        session.view.previous_verified_bytes -= last_bytes;
+    }
     session.view.previous_elapsed_seconds -= diag
         .snapshot()
         .snapshot

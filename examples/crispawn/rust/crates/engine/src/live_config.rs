@@ -95,6 +95,7 @@ impl Settings {
             "logging.on_error",
             "logging.never",
             "processing.auto",
+            "processing.verify_after_write",
             "processing.profile.balanced",
             "processing.profile.long_matches",
             "processing.profile.high_compression",
@@ -189,7 +190,12 @@ struct Logging {
 struct Processing {
     mode: String,
     initial_profile: crate::profiles::Profile,
+    #[serde(default = "enabled")]
+    verify_after_write: bool,
     io_policy: IoPolicy,
+}
+fn enabled() -> bool {
+    true
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -335,6 +341,7 @@ impl Runtime {
         };
         config.tuning.mode = crate::job_config::TuningMode::Auto;
         config.tuning.profile = self.processing.initial_profile;
+        config.tuning.verify_after_write = self.processing.verify_after_write;
         config.tuning.io_policy = policy;
         config.validate().map_err(|_| invalid("runtime"))?;
         Ok(Settings {

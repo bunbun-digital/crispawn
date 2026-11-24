@@ -546,6 +546,7 @@ impl<'a> View<'a> {
         self.title.hidden(input.logs_open);
         self.subtitle.hidden(input.logs_open);
         let snap = s.snapshot.as_ref();
+        let checks_skipped = mode == Mode::Backup && !s.backup_verification_enabled;
         let read = snap.map(|x| x.read_raw_bytes).unwrap_or(0);
         let durable = if mode == Mode::Backup {
             s.storage.as_ref().map(|v| v.written_source_bytes)
@@ -568,6 +569,8 @@ impl<'a> View<'a> {
             .min(total);
         let aggregate = if total == 0 {
             0
+        } else if checks_skipped {
+            (u128::from(done) * 1000 / u128::from(total)) as i32
         } else {
             ((u128::from(done) + u128::from(checked)) * 1000 / (2 * u128::from(total))) as i32
         };
@@ -645,6 +648,11 @@ impl<'a> View<'a> {
         ))?;
         self.confirmed_bar
             .bar(1000, ratio(verified, current_total))?;
+        if checks_skipped {
+            self.confirmed.text(l.text(T::VerificationSkipped))?;
+            self.confirmed_exact.text("")?;
+            self.confirmed_bar.bar(1000, 0)?;
+        }
         let current = v
             .current_disk
             .and_then(|i| v.disks.get(i))
@@ -793,7 +801,7 @@ impl<'a> View<'a> {
         } else {
             T::AllFinished
         }))?;
-        self.finish_body.text(&if page == Page::Failed {
+        let mut finish_message = if page == Page::Failed {
             let reason = l.error_detail(&s.detail);
             let next = if let Some(seconds) = s.shutdown_countdown_seconds {
                 l.message(T::Shutdown, &[("seconds", &seconds.to_string())])?
@@ -807,7 +815,12 @@ impl<'a> View<'a> {
             l.text(T::Done).into()
         } else {
             l.text(T::Logging).into()
-        })?;
+        };
+        if checks_skipped && page == Page::Complete {
+            finish_message.push('\n');
+            finish_message.push_str(l.text(T::VerificationSkipped));
+        }
+        self.finish_body.text(&finish_message)?;
         self.log_summary.text(&format!(
             "{}\n{} {} / {} ({})\n{}",
             l.text(T::LogsTitle),

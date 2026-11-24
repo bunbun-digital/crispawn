@@ -28,12 +28,22 @@ ordered raw buffer is released after updating its file's standard BLAKE3 state.
 Only encoded payloads and bounded hash/metadata state cross the writer queue.
 
 Queue accounting charges allocated payload capacity and per-item overhead,
-including zero-compressed frames. Automatic live v2 processing uses 75% of
-available RAM after a 192 MiB reserve, leaving the rest for the OS/cache/UI;
-it no longer inherits a fixed 4 GiB default as its hardware ceiling. Explicit
-legacy/fixed limits remain caps. The encoded queue grows lazily into remaining
-processing RAM after worst-case encoder, raw/reordering and verification
-workspaces, with an 8 GiB queue ceiling. Selection reserves these together.
+including zero-compressed frames. The encoded queue holds at most two ready
+encoding units, with a byte bound of `2 * (range_bytes + 8192)`: approximately
+32 MiB for the normal 16 MiB frame. It is not a fraction of RAM. Even highly
+compressible frames cannot accumulate by the thousands. Active/read/reordering
+jobs together are limited to the current source-worker count, rather than twice
+that count. Consumers signal freed slots and producers replenish only consumed
+work; a slow destination cannot grow the queue into gigabytes of anonymous RAM.
+
+Automatic live v2 processing has a worst-case safety ceiling of at most 3 GiB
+and leaves at least 512 MiB of startup available memory outside that ceiling.
+The ceiling covers active encoder/raw/reordering workspaces, descriptors, both
+queues and readback buffers; it is not a preallocation or a division of cache
+between stages. Actual buffers are allocated only for outstanding work. Explicit
+legacy/fixed limits remain caps. Selection reserves all bounded workspaces
+together and reduces concurrency if needed. Spare memory remains available to
+the OS destination page cache without an application prefetch quota consuming it.
 Older serialized v3 plans keep their
 historical validation rules; resuming may lower the effective producer ceiling
 to fit the new queue without rewriting the archive plan. Queue pressure stops
@@ -45,6 +55,22 @@ queue limit and kernel writeback limits all matter. Automatic copies do not
 wait for intermediate fsyncs; the storage system may still throttle writes when
 dirty-page limits are reached. The retained filesystem fd lets the final sync
 detect earlier writeback errors. Legacy contiguous plans retain checkpoint fsyncs.
+
+After a source range is read into its owned raw buffer, a best-effort
+`POSIX_FADV_DONTNEED` hint releases clean source-cache pages. It does not change
+source bytes, drop destination cache, flush output or require kernel tuning.
+The kernel may ignore the hint; dirty source pages in ordinary-file tests are
+not forcibly discarded. Source selection and all data/hash coverage are unchanged.
+
+Live status and once-per-probe-cycle `memory_sample` log records include process
+RSS, MemAvailable, Cached, Dirty, Writeback, AnonPages, the processing limit and
+encoded queue usage/limit. Cached and Dirty overlap and must not be added as
+independent allocations. MemAvailable includes reclaimable cache, not only free
+pages. These observations distinguish a large anonymous prefetch queue from
+normal kernel writeback throttling; a stalled userspace write alone does not
+prove either one. The observer never changes host or guest writeback limits.
+See the [kernel VM documentation](https://kernel.org/doc/html/latest/admin-guide/sysctl/vm.html)
+and [posix_fadvise manual](https://man7.org/linux/man-pages/man2/posix_fadvise.2.html).
 
 `read_ahead` job events report actual completed source reads, queued encoded
 bytes and queue budget. Read-ahead does not advance durable/verified progress

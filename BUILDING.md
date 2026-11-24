@@ -48,6 +48,19 @@ python3 tools/test-crispawn-console-qemu.py --iso /path/to/the/generated.iso --w
 python3 tools/test-crispawn-ntfs-qemu.py --iso /path/to/the/generated.iso --work .orchestrator-test/unique-ntfs-run
 ```
 
+For a constrained destination/cache observation, use a separate ordinary image
+directory with room for a random 1 GiB source and a 4 GiB sparse USB image:
+
+```sh
+python3 tools/test-crispawn-cache-qemu.py --iso /path/to/the/generated.iso --work .orchestrator-test/unique-cache-run --images-dir /path/to/new-cache-images
+```
+
+The cache test uses two vCPUs, 4 GiB RAM and an 8 MiB/s destination write limit.
+It records guest process RSS, available memory, new memory telemetry when present,
+and QEMU block I/O counters. It is a software-throttled VM observation, not a
+physical USB benchmark. Reuse an immutable ordinary `--source-file` for comparisons.
+The reports distinguish guest finalization from independent NTFS readback.
+
 The ISO uses signed Debian kernel/shim/GRUB with Buildroot userspace. The
 ISO build report records exact inputs and readback hashes. A successful build
 is separate from actual Secure Boot, copy and restore acceptance.

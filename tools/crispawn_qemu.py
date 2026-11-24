@@ -15,7 +15,7 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
               exercise_shortcuts=False, cpus=2, memory_mib=1536, expected_failure_code=None,
               extra_disk_images=(), ui_scenario=None, record_frames=False, source_read_bps=None, source_serial="PB-SOURCE-0001",
               network="none", optical_iso=None, legacy_bios=False, expect_failure_stay=False,
-              serial_port=True, firmware_variables=None):
+              serial_port=True, firmware_variables=None, destination_write_bps=None):
     assert usb_format in ["raw", "vhdx"]
     assert isinstance(cpus, int) and 1 <= cpus <= 32
     assert isinstance(memory_mib, int) and 512 <= memory_mib <= 16384
@@ -24,6 +24,7 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
     assert not legacy_bios or optical_iso is not None
     assert not expect_failure_stay or expected_failure_code is not None
     assert type(serial_port) is bool
+    assert destination_write_bps is None or (type(destination_write_bps) is int and destination_write_bps > 0)
     # With no UART there are no live probes. The caller must validate the
     # persisted NTFS archive/logs and captured GUI, separately from shutdown.
     assert serial_port or not (expected_failure_code or exercise_shortcuts or ui_scenario or expect_failure_stay)
@@ -43,7 +44,8 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
             *([] if legacy_bios else ["-drive", "if=pflash,format=raw,unit=0,readonly=on,file=" + firmware,
                                       "-drive", f"if=pflash,format=raw,unit=1,file={variables}"]),
             "-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0",
-            "-drive", f"if=none,id=usb,format={usb_format},file={usb_image},cache=writeback",
+            "-drive", f"if=none,id=usb,format={usb_format},file={usb_image},cache=writeback" +
+                      (f",throttling.bps-write={destination_write_bps}" if destination_write_bps else ""),
             "-device", "usb-storage,bus=xhci.0,drive=usb,bootindex=" + ("2" if optical_iso else "1") + ",serial=CRISPAWN-USB",
             "-drive", f"if=none,id=source,format=raw,file={disk_image}" + (",readonly=on" if readonly else "") +
                       (f",throttling.bps-read={int(source_read_bps)}" if source_read_bps else ""),
@@ -272,6 +274,7 @@ def run_guest(work, evidence, usb_image, disk_image, timeout=600, readonly=False
                             (evidence / "screens.json").write_text(json.dumps(screens,indent=2)+"\n")
                         monitor.write(json.dumps({"host_monotonic": time.monotonic(), "qemu": status,
                                                   "host_free_bytes": available,
+                                                  "blockstats": execute('query-blockstats') if destination_write_bps else None,
                                                   "guest_heartbeat": probes[-1]["heartbeat"] if probes else None}) + "\n")
                         monitor.flush()
                     except (EOFError, OSError):

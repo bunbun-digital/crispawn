@@ -78,7 +78,7 @@ impl Queue {
             "encoded frame exceeds prefetch budget",
         )?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        while state.bytes + cost > self.budget {
+        while state.frames.len() >= 2 || state.bytes + cost > self.budget {
             control.check_cancel()?;
             require(
                 !self.stopped.load(Ordering::Acquire),
@@ -159,6 +159,9 @@ struct ProducerControl<'a> {
     queue: &'a Queue,
 }
 impl ExecutionControl for ProducerControl<'_> {
+    fn verify_after_write(&self) -> bool {
+        self.base.verify_after_write()
+    }
     fn cancelled(&self) -> bool {
         self.queue.stopped.load(Ordering::Acquire)
             || self.queue.failed.load(Ordering::Acquire)
@@ -245,7 +248,7 @@ fn produce(
                     paused = false;
                 }
                 while (!exhausted || !deferred.is_empty())
-                    && outstanding < feedback.active.workers as usize * 2
+                    && outstanding < feedback.active.workers as usize
                     && !control.pause_requested()
                 {
                     let (range, saved) = if let Some((range, profile, read_bytes))=deferred.pop_front() {
@@ -281,6 +284,7 @@ fn produce(
                                     error
                                 })?;
                                 let read_seconds = start.elapsed().as_secs_f64();
+                                io::release_source_cache(source, offset, length);
                                 let read=queue.read.fetch_add(length,Ordering::Relaxed)+length;
                                 if let Some(s)=&queue.storage {s.source_read.store(read,Ordering::Relaxed);}
                                 hooks.at("codec_encode")?;
@@ -768,5 +772,31 @@ mod tests {
             assert_eq!(child.join().unwrap(), "CANCELLED");
         });
         assert!(Queue::new(1, 0).push(frame(), &control).is_err());
+    }
+    #[test]
+    fn small_compressed_frames_cannot_fill_spare_ram_beyond_two_handoffs() {
+        // Even a huge byte allowance must not turn highly compressed data into
+        // an arbitrarily deep prefetch queue.
+        let queue = Queue::new(8 << 30, 0);
+        let control = AtomicBool::new(false);
+        queue.push(frame(), &control).unwrap();
+        queue.push(frame(), &control).unwrap();
+        let (send, received) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let queue = &queue;
+            let control = &control;
+            let child = scope.spawn(move || {
+                send.send(()).unwrap();
+                queue.push(frame(), control)
+            });
+            received.recv_timeout(Duration::from_secs(2)).unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+            assert_eq!(queue.state.lock().unwrap().frames.len(), 2);
+            assert!(!child.is_finished());
+            // Cancelling while the count limit (rather than bytes) blocks
+            // must release the producer without waiting for destination I/O.
+            control.store(true, Ordering::Release);
+            assert_eq!(child.join().unwrap().unwrap_err().code, "CANCELLED");
+        });
     }
 }

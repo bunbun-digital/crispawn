@@ -22,6 +22,7 @@ pub struct Tuning {
     pub max_trials: u32,
     pub profile: crate::profiles::Profile,
     pub verify_workers: Option<u32>,
+    pub verify_after_write: bool,
     pub io_policy: crate::supervisor::Policy,
 }
 impl Default for Tuning {
@@ -36,6 +37,7 @@ impl Default for Tuning {
             max_trials: 12,
             profile: crate::profiles::Profile::default(),
             verify_workers: None,
+            verify_after_write: true,
             io_policy: crate::supervisor::Policy::default(),
         }
     }

@@ -345,7 +345,7 @@ pub(crate) fn write_indices(root: &Path, entries: &[FileEntry]) -> Result<()> {
         checksum_text(&hashes(root)?).as_bytes(),
     )
 }
-pub(crate) fn write_commit(root: &Path, id: &str) -> Result<()> {
+pub(crate) fn write_commit_with_verification(root: &Path, id: &str, checked: bool) -> Result<()> {
     let mut hashes = hashes(root)?;
     hashes.insert(
         "checksums.sha256".into(),
@@ -358,8 +358,9 @@ pub(crate) fn write_commit(root: &Path, id: &str) -> Result<()> {
             format_version: io::read_json::<Metadata>(&root.join("metadata.json"))?.format_version,
             backup_id: id.into(),
             hashes,
-            verification_kind: if io::read_json::<Plan>(&root.join("plan.json"))?.segmented_storage
-            {
+            verification_kind: if !checked {
+                "skipped"
+            } else if io::read_json::<Plan>(&root.join("plan.json"))?.segmented_storage {
                 "compressed_blake3"
             } else {
                 "buffered_reopen"
@@ -465,12 +466,14 @@ pub(crate) fn manifest(
             commit.format_version == metadata.format_version
                 && commit.backup_id == metadata.backup_id
                 && commit.hashes == expected
-                && commit.verification_kind
-                    == if plan.segmented_storage {
-                        "compressed_blake3"
-                    } else {
-                        "buffered_reopen"
-                    },
+                && if plan.segmented_storage {
+                    matches!(
+                        commit.verification_kind.as_str(),
+                        "compressed_blake3" | "skipped"
+                    )
+                } else {
+                    commit.verification_kind == "buffered_reopen"
+                },
             "COMMIT_MISMATCH",
             "v2 commit identity or metadata",
         )?;

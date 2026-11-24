@@ -59,6 +59,37 @@ impl JobEvents for Events {
     }
 }
 #[test]
+fn unchecked_copy_completes_without_verification_credit_and_restore_keeps_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path());
+    config.tuning.plan.format_version = 3;
+    config.tuning.plan.segmented_storage = true;
+    config.tuning.verify_after_write = false;
+    config.tuning.mode = TuningMode::Auto;
+    let events = Arc::new(Events::default());
+    let report = Controller::new(events.clone())
+        .unwrap()
+        .run(&config, Operation::Backup)
+        .unwrap();
+    assert_eq!(report.status, "complete");
+    assert_eq!(report.verify_workers, 0);
+    assert_eq!(report.engine.unwrap().verification_kind, "skipped");
+    for e in events.0.lock().unwrap().iter() {
+        if let JobEvent::Progress { snapshot, .. } = e {
+            assert_eq!(snapshot.verified_raw_bytes, 0);
+        }
+    }
+    let restored = Controller::new(Arc::new(NoJobEvents))
+        .unwrap()
+        .run(&config, Operation::Restore)
+        .unwrap();
+    assert!(restored.engine.unwrap().restored_ranges_verified);
+    assert_eq!(
+        fs::read(config.source_file.unwrap()).unwrap(),
+        fs::read(config.restore_target_file.unwrap()).unwrap()
+    );
+}
+#[test]
 fn unattended_controller_backup_verify_restore_and_view_are_separate() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path());

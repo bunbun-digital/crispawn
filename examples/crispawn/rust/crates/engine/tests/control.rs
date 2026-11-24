@@ -74,8 +74,8 @@ fn paused_copy(cancel: bool, format_version: u32) {
         ..Plan::default()
     };
     let control = Arc::new(RunControl::new());
-    let prefetch_target =
-        (format_version == 3).then(|| plan.range_count(fs::metadata(&source).unwrap().len()));
+    let read_unit = plan.range_bytes;
+    let prefetch_target = (format_version == 3).then_some(4);
     let hooks = Counters {
         control: control.clone(),
         requested: AtomicBool::new(false),
@@ -110,7 +110,8 @@ fn paused_copy(cancel: bool, format_version: u32) {
         };
         assert_eq!(paused.phase, "PAUSED");
         if format_version == 3 {
-            assert_eq!(paused.read_raw_bytes, fs::metadata(&source).unwrap().len());
+            assert!(paused.read_raw_bytes >= 4 * read_unit);
+            assert!(paused.read_raw_bytes < fs::metadata(&source).unwrap().len());
             assert!(paused.durable_raw_bytes < paused.read_raw_bytes);
         } else {
             assert_eq!(paused.durable_raw_bytes, paused.read_raw_bytes);

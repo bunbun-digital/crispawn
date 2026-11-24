@@ -19,6 +19,7 @@ pub mod job_config;
 pub mod journal;
 pub mod live;
 pub mod live_config;
+mod memory;
 pub mod network_config;
 mod ntfs_diagnostics;
 pub mod online;

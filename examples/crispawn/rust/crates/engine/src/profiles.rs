@@ -30,24 +30,22 @@ pub(crate) fn processing_workspace(plan: &Plan, verifiers: u32) -> u64 {
         }
 }
 
-pub(crate) fn queue_budget(plan: &Plan, verifiers: u32) -> u64 {
+pub(crate) fn queue_budget(plan: &Plan, _verifiers: u32) -> u64 {
     if plan.format_version != 3 {
         return 0;
     }
-    let minimum = 2 * plan.range_bytes + 8192;
-    // Reserve worst-case encoding, raw/reordering and decoding workspaces first.
-    // The queue grows lazily into remaining processing RAM; the OS reserve is separate.
-    plan.memory_limit_bytes
-        .saturating_sub(processing_workspace(plan, verifiers))
-        .clamp(minimum, 8 << 30)
+    // At most two ready encoding units, independent of installed RAM and codec
+    // ratio. This is a handoff window, not a share of all spare memory.
+    2 * (plan.range_bytes + 8192)
 }
 
 pub(crate) fn live_memory_budget(configured: u64, available: u64, automatic_v2: bool) -> u64 {
-    let usable = available.saturating_sub(192 << 20);
     if automatic_v2 {
-        usable / 4 * 3
+        // A worst-case safety ceiling for active jobs, not an allocation or a
+        // cache partition. Ready data is independently bounded to two units.
+        available.saturating_sub(512 << 20).min(3 << 30)
     } else {
-        configured.min(usable)
+        configured.min(available.saturating_sub(192 << 20))
     }
 }
 
@@ -140,16 +138,17 @@ mod tests {
         for gib in [4u64, 8, 16] {
             let available = gib << 30;
             let budget = live_memory_budget(4 << 30, available, true);
-            assert!(budget < available && available - budget >= available / 4);
+            assert!(available - budget >= 512 << 20 && budget <= 3 << 30);
             let mut template = Plan::current();
             template.memory_limit_bytes = budget;
             let (mut p, v) = select(&template, Profile::Balanced, 8, budget, 1 << 40).unwrap();
             crate::online::reserve(&mut p, 8, v).unwrap();
             assert!(memory_bound(&p, v) <= budget);
             assert!(queue_budget(&p, v) >= 2 * p.range_bytes + 8192);
-            if gib == 16 {
-                assert!(budget > 8 << 30);
-                assert!(queue_budget(&p, v) > 4 << 30);
+            assert_eq!(queue_budget(&p, v), 2 * (p.range_bytes + 8192));
+            assert!(queue_budget(&p, v) < 33 << 20);
+            if gib >= 8 {
+                assert!(p.workers >= 8);
             }
         }
         assert_eq!(live_memory_budget(1 << 30, 16 << 30, false), 1 << 30);

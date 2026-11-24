@@ -1,5 +1,16 @@
 # Segmented compressed storage
 
+Copy-time stored-byte readback is enabled by default. Runtime settings may
+explicitly set `processing.verify_after_write` to `false`. In that mode, part
+hashes and original-range hashes are still computed, but no newly written part
+payload is reread during copying and confirmed counters remain zero. Structural
+receipts, disk coverage checks and final filesystem synchronization still apply.
+The `COMMITTED` marker and job report record `verification_kind: "skipped"`.
+This records a completed unchecked copy. Explicit archive verification and
+restoration still validate the recorded hashes and restored target. This additive
+commit value requires a compatible new reader; older ISOs reject it. Existing
+checked archives and their commit values remain readable without rewriting them.
+
 New automatic-copy plans set `segmented_storage: true`. The setting is an
 explicit extension to the stored plan, separate from the unchanged Builder
 media layout v2 and runtime configuration v2. Old plans omit it and retain

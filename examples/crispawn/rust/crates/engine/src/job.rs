@@ -476,7 +476,18 @@ impl Controller {
                 s.verify_estimate = verify_estimate;
             }
             report.selected_plan = Some(plan.clone());
-            report.verify_workers = selected_verify;
+            require(
+                config.tuning.verify_after_write || plan.segmented_storage,
+                "INVALID_CONFIG",
+                "skip verification is supported only for segmented copies",
+            )?;
+            self.control
+                .set_backup_verification(config.tuning.verify_after_write);
+            report.verify_workers = if config.tuning.verify_after_write {
+                selected_verify
+            } else {
+                0
+            };
             self.control.set_verification_workers(selected_verify);
             self.events.emit(JobEvent::PlanSelected {
                 plan: plan.clone(),
@@ -655,14 +666,18 @@ impl Controller {
             }
         }
         if s.flow.phase() == Phase::Working(Stage::Verify) {
-            s.flow.backend(
-                Backend::VerifyProgress {
-                    verified_bytes: total,
-                    eta: None,
-                },
-                self.ms(),
-            )?;
-            s.flow.backend(Backend::VerifyFinished, self.ms())?;
+            if !self.control.verify_after_write() {
+                s.flow.backend(Backend::VerifySkipped, self.ms())?;
+            } else {
+                s.flow.backend(
+                    Backend::VerifyProgress {
+                        verified_bytes: total,
+                        eta: None,
+                    },
+                    self.ms(),
+                )?;
+                s.flow.backend(Backend::VerifyFinished, self.ms())?;
+            }
         }
         require(
             s.flow.phase() == Phase::Finalizing,

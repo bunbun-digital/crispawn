@@ -254,19 +254,38 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "properties": {"method": {"const": "dhcp"}},
-          "required": ["method"]
+          "properties": {
+            "method": {
+              "const": "dhcp"
+            }
+          },
+          "required": [
+            "method"
+          ]
         },
         {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "method": {"const": "static"},
-            "address": {"$ref": "#/$defs/ipv4_address"},
-            "netmask": {"$ref": "#/$defs/ipv4_address"},
-            "router": {"$ref": "#/$defs/ipv4_address"}
+            "method": {
+              "const": "static"
+            },
+            "address": {
+              "$ref": "#/$defs/ipv4_address"
+            },
+            "netmask": {
+              "$ref": "#/$defs/ipv4_address"
+            },
+            "router": {
+              "$ref": "#/$defs/ipv4_address"
+            }
           },
-          "required": ["method", "address", "netmask", "router"]
+          "required": [
+            "method",
+            "address",
+            "netmask",
+            "router"
+          ]
         }
       ]
     },
@@ -309,21 +328,44 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "mode": {"const": "ethernet"},
-            "ipv4": {"$ref": "#/$defs/ipv4_assignment"}
+            "mode": {
+              "const": "ethernet"
+            },
+            "ipv4": {
+              "$ref": "#/$defs/ipv4_assignment"
+            }
           },
-          "required": ["mode", "ipv4"]
+          "required": [
+            "mode",
+            "ipv4"
+          ]
         },
         {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "mode": {"const": "wifi"},
-            "ipv4": {"$ref": "#/$defs/ipv4_assignment"},
-            "country": {"type": "string", "pattern": "^[A-Z]{2}$", "minLength": 2, "maxLength": 2},
-            "wifi_profile": {"$ref": "#/$defs/wifi_profile"}
+            "mode": {
+              "const": "wifi"
+            },
+            "ipv4": {
+              "$ref": "#/$defs/ipv4_assignment"
+            },
+            "country": {
+              "type": "string",
+              "pattern": "^[A-Z]{2}$",
+              "minLength": 2,
+              "maxLength": 2
+            },
+            "wifi_profile": {
+              "$ref": "#/$defs/wifi_profile"
+            }
           },
-          "required": ["mode", "ipv4", "country", "wifi_profile"]
+          "required": [
+            "mode",
+            "ipv4",
+            "country",
+            "wifi_profile"
+          ]
         }
       ]
     },
@@ -627,6 +669,11 @@
         },
         "io_policy": {
           "$ref": "urn:crispawn:config:common:1#/$defs/io_policy"
+        },
+        "verify_after_write": {
+          "type": "boolean",
+          "default": true,
+          "description": "Verify newly written backup compressed parts by readback. False skips copy-time readback only; original and stored BLAKE3 hashes, final sync and restore verification remain enabled."
         }
       },
       "required": [

@@ -63,6 +63,111 @@ fn parts(root: &Path) -> Vec<PathBuf> {
     out.sort();
     out
 }
+#[test]
+fn skipping_copy_readback_is_explicit_and_restore_still_verifies_target() {
+    use crispawn_engine::control::RunControl;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Default)]
+    struct Readback(AtomicUsize);
+    impl Hooks for Readback {
+        fn at(&self, point: &'static str) -> Result<()> {
+            if point == "restore_verify_read" {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+    let t = tempfile::tempdir().unwrap();
+    let source = t.path().join("source");
+    let original = bytes();
+    fs::write(&source, &original).unwrap();
+    let archive = t.path().join("archive");
+    let control = RunControl::new();
+    control.set_backup_verification(false);
+    let progress = Progress::default();
+    let hook = Readback::default();
+    let report = backup::backup(
+        &source,
+        &archive,
+        plan(),
+        t.path(),
+        &progress,
+        &hook,
+        &control,
+    )
+    .unwrap();
+    assert_eq!(report.verification_kind, "skipped");
+    assert!(report.dataset_committed);
+    let states = progress.0.lock().unwrap();
+    assert!(!states.is_empty() && states.iter().all(|v| *v == 0));
+    let commit: serde_json::Value =
+        serde_json::from_slice(&fs::read(archive.join("COMMITTED")).unwrap()).unwrap();
+    assert_eq!(commit["verification_kind"], "skipped");
+    // An explicit later verify does perform the stored-byte and original checks.
+    verify::verify(&archive, t.path(), &NoEvents).unwrap();
+    let target = t.path().join("target");
+    let restored = restore::restore(&archive, &target, false, t.path(), &NoEvents, &hook).unwrap();
+    assert!(restored.restored_ranges_verified && hook.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(fs::read(target).unwrap(), original);
+    // The stored hash remains meaningful even when initial readback was skipped.
+    use std::os::unix::fs::FileExt;
+    let part = parts(&archive)[0].clone();
+    let changed = fs::read(&part).unwrap()[0] ^ 0xff;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&part)
+        .unwrap()
+        .write_at(&[changed], 0)
+        .unwrap();
+    assert!(verify::verify(&archive, t.path(), &NoEvents).is_err());
+    let enabled_progress = Progress::default();
+    let enabled = backup::backup(
+        &source,
+        &t.path().join("enabled"),
+        plan(),
+        t.path(),
+        &enabled_progress,
+        &hook,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(enabled.verification_kind, "compressed_blake3");
+    enabled_progress.check(original.len() as u64);
+}
+#[test]
+fn skipped_readback_does_not_skip_final_flush_failure() {
+    struct Fail;
+    impl Hooks for Fail {
+        fn at(&self, point: &'static str) -> Result<()> {
+            if point == "before_final_storage_sync" {
+                Err(Error::new(
+                    "FINAL_FLUSH_TEST",
+                    "final flush is still mandatory",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let t = tempfile::tempdir().unwrap();
+    let source = t.path().join("source");
+    fs::write(&source, bytes()).unwrap();
+    let control = crispawn_engine::control::RunControl::new();
+    control.set_backup_verification(false);
+    let archive = t.path().join("archive");
+    let error = backup::backup(
+        &source,
+        &archive,
+        plan(),
+        t.path(),
+        &NoEvents,
+        &Fail,
+        &control,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "FINAL_FLUSH_TEST");
+    assert!(!archive.join("COMMITTED").exists());
+}
 #[cfg(target_os = "linux")]
 #[test]
 fn copy_has_no_part_fsync_and_final_flush_failure_never_commits() {
@@ -80,10 +185,8 @@ fn copy_has_no_part_fsync_and_final_flush_failure_never_commits() {
         .status()
         .unwrap();
     assert!(status.success());
-    for fail in [false, true] {
-        let case = t
-            .path()
-            .join(if fail { "writeback-error" } else { "success" });
+    for (fail, skip) in [(false, false), (true, false), (false, true), (true, true)] {
+        let case = t.path().join(format!("writeback-error-{fail}-skip-{skip}"));
         fs::create_dir(&case).unwrap();
         let archive = case.join("archive");
         let trace = case.join("sync.tsv");
@@ -101,6 +204,9 @@ fn copy_has_no_part_fsync_and_final_flush_failure_never_commits() {
         if fail {
             command.env("CRISPAWN_TEST_SYNCFS_EIO", "1");
         }
+        if skip {
+            command.env("CRISPAWN_TEST_SKIP_READBACK", "1");
+        }
         let output = command.output().unwrap();
         assert!(
             output.status.success(),
@@ -117,9 +223,9 @@ fn copy_has_no_part_fsync_and_final_flush_failure_never_commits() {
         assert_eq!(barriers.len(), 1, "{text}");
         assert!(barriers[0].ends_with("committed=0"));
         assert!(
-            !lines
-                .iter()
-                .any(|line| line.contains("/segments/") || line.contains("/data/data-")),
+            !lines.iter().any(|line| (line.starts_with("fsync\t")
+                || line.starts_with("fdatasync\t"))
+                && (line.contains("/segments/") || line.contains("/data/data-"))),
             "{text}"
         );
         assert!(
@@ -139,6 +245,15 @@ fn copy_has_no_part_fsync_and_final_flush_failure_never_commits() {
             "log rotation/progress must not force device flushes during copy: {text}"
         );
         assert_eq!(archive.join("COMMITTED").exists(), !fail);
+        let copy_reads = lines
+            .iter()
+            .filter(|line| line.starts_with("pread") && line.ends_with("committed=0"))
+            .count();
+        assert_eq!(
+            copy_reads > 0,
+            !skip,
+            "copy readback must follow the explicit setting: {text}"
+        );
         if !fail {
             let barrier = lines
                 .iter()
@@ -175,6 +290,8 @@ fn storage_sync_fixture_child() {
         );
     }
     diag.flush().unwrap();
+    let control = crispawn_engine::control::RunControl::new();
+    control.set_backup_verification(std::env::var_os("CRISPAWN_TEST_SKIP_READBACK").is_none());
     let result = backup::backup(
         &source,
         &archive,
@@ -182,7 +299,7 @@ fn storage_sync_fixture_child() {
         root,
         &NoEvents,
         &NoHooks,
-        &AtomicBool::new(false),
+        &control,
     );
     diag.record("copy_result", serde_json::json!({"success":result.is_ok()}));
     diag.close_persistent().unwrap();

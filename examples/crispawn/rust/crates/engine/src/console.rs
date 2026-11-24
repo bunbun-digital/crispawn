@@ -171,6 +171,14 @@ pub fn render(s: &Status, input: &Interaction, logs: &str) -> Result<String> {
                         },
                     ),
                 ] {
+                    if matches!(key, T::Confirmed)
+                        && v.mode == crispawn_core::presentation::Mode::Backup
+                        && !s.backup_verification_enabled
+                    {
+                        text.push_str(l.text(T::VerificationSkipped));
+                        text.push('\n');
+                        continue;
+                    }
                     text.push_str(&format!(
                         "{}: {} ({}) / {} ({})\n",
                         l.text(key),

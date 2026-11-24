@@ -94,6 +94,7 @@ pub enum Backend {
         eta: Option<Estimate>,
     },
     VerifyFinished,
+    VerifySkipped,
     Paused,
     Resumed,
     Cancelled,
@@ -428,6 +429,17 @@ impl Workflow {
                 self.eta = eta;
                 Ok(vec![])
             }
+            Backend::VerifySkipped => {
+                require(
+                    self.phase == Phase::Working(Stage::Verify)
+                        && self.copy_finished
+                        && self.verified == 0,
+                    "INVALID_TRANSITION",
+                    "skip only the completed copy's verification stage",
+                )?;
+                self.verify_finished = true;
+                Ok(self.after_work(Stage::Verify))
+            }
             Backend::VerifyFinished => {
                 require(
                     self.verified == self.total && self.total > 0,
@@ -676,6 +688,18 @@ mod tests {
         f.backend(Backend::Cancelled, 0).unwrap();
         assert_eq!(f.phase(), Phase::Cancelled);
         assert!(f.tick(1_000_000).unwrap().is_empty());
+    }
+    #[test]
+    fn explicit_skip_finishes_copy_without_inventing_verified_bytes() {
+        let mut f = copying(Startup::CuiUnattended);
+        assert!(f.backend(Backend::VerifySkipped, 0).is_err());
+        finish_copy(&mut f);
+        assert_eq!(
+            f.backend(Backend::VerifySkipped, 0).unwrap(),
+            vec![Effect::CommitDataset]
+        );
+        assert_eq!(f.verified, 0);
+        assert_eq!(f.phase(), Phase::Finalizing);
     }
     #[test]
     fn cleanup_error_keeps_committed_dataset_but_never_requests_poweroff() {

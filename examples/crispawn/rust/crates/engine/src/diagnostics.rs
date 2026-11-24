@@ -402,7 +402,13 @@ impl JobEvents for Diagnostics {
                     ..
                 } => {
                     s.selected_plan = Some(plan.clone());
-                    s.verify_workers = *verify_workers;
+                    s.verify_workers = if !s.backup_verification_enabled
+                        && s.session.mode == crispawn_core::presentation::Mode::Backup
+                    {
+                        0
+                    } else {
+                        *verify_workers
+                    };
                     if s.snapshot.is_none() {
                         s.eta_seconds = *eta_seconds;
                     }
@@ -454,7 +460,8 @@ impl JobEvents for Diagnostics {
                 JobEvent::ReadAhead {
                     backup_id,
                     read_raw_bytes,
-                    ..
+                    queued_encoded_bytes,
+                    queue_budget_bytes,
                 } => {
                     if let Some(snapshot) = s
                         .snapshot
@@ -466,6 +473,14 @@ impl JobEvents for Diagnostics {
                                 snapshot.read_raw_bytes = read;
                                 self.last_progress.store(self.ms(), Ordering::Relaxed);
                             }
+                        }
+                        if let (Ok(bytes), Ok(limit)) = (
+                            queued_encoded_bytes.parse::<u64>(),
+                            queue_budget_bytes.parse::<u64>(),
+                        ) {
+                            let memory = s.memory.get_or_insert_with(Default::default);
+                            memory.encoded_queue_bytes = bytes;
+                            memory.encoded_queue_limit_bytes = limit;
                         }
                     }
                 }
