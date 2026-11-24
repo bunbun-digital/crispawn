@@ -125,7 +125,7 @@ impl Language {
             Text::WriteSpeed => ("書込速度（同期済み）", "Write speed (synced)"),
             Text::StorageBaseline => ("基準サイズ", "Baseline size"),
             Text::StorageWriting => ("書き込み中", "Writing"),
-            Text::StorageSyncing => ("USBへの同期を待っています", "Waiting for USB sync"),
+            Text::StorageSyncing => ("保存先への同期を待っています", "Waiting for destination sync"),
             Text::StorageChecking => ("保存したデータを確認しています", "Checking stored bytes"),
             Text::StorageMetadata => ("管理情報を保存しています", "Saving metadata"),
             Text::StorageReady => ("次の書き込みを待っています", "Waiting for the next write"),
