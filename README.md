@@ -110,13 +110,16 @@ the expected path. See [the USB file layout specification](docs/COMPATIBILITY.md
    and sets a baseline file size toward a soft five-second target. The UI also
    shows queued write blocks, current file MB, configured/active writer concurrency
    and read/write MB/s. At least two writer slots are provided; active use depends on available data.
-   Each stored part is reread and checked by compressed-byte BLAKE3 while copying
+   By default, each stored part is reread and checked by compressed-byte BLAKE3 while copying
    continues; backup confirmation does not decompress the data.
+   `processing.verify_after_write=false` skips this copy-time readback. Hashes,
+   final synchronization and restore checks remain enabled; the UI and logs
+   explicitly show that copy-time checking was skipped.
 5. **Restore:** a saved date/session, source disk from that set and destination
    disk are selected and confirmed. The target must fit the original disk's byte
    length. Restoring overwrites the selected target and checks restored ranges
    by reading them back while further ranges are restored.
-6. **Completion:** success is shown only after all selected work and checks
+6. **Completion:** success is shown only after all selected work and enabled checks
    finish, including the final storage synchronization. Copying does not wait for
    a physical-media sync after every file. There is no separate verification stage.
    Automatic resume after power loss is not supported. With poweroff enabled,
@@ -177,7 +180,7 @@ split a compression frame, so keep the complete backup together for restore.
 The first file's measured service time determines the baseline part size; tails
 can be smaller. Every physical file remains below **2,000,000,000 bytes**.
 
-Stored parts are checked against BLAKE3 calculated from the compressed bytes
+With copy-time readback enabled, stored parts are checked against BLAKE3 calculated from the compressed bytes
 before writing. The original-range BLAKE3 is retained separately for restored
 output checks. Copy confirmation does not decompress the saved data. A single
 whole-disk hash is not required. Older contiguous backups remain readable.
