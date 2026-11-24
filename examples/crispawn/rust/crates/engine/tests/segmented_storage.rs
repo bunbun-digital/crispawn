@@ -209,3 +209,45 @@ fn restore_target_cannot_alias_a_physical_part_through_an_external_hard_link() {
     );
     assert_eq!(fs::read(part).unwrap(), before);
 }
+#[test]
+fn segmented_storage_restores_zstd_gzip_xz_raw_and_zero_streams() {
+    for codec in [Codec::Zstd, Codec::Gzip, Codec::Xz, Codec::Raw, Codec::Zero] {
+        let t = tempfile::tempdir().unwrap();
+        let source = t.path().join("source");
+        let archive = t.path().join("archive");
+        let mut raw = bytes();
+        for (i, chunk) in raw.chunks_mut(16384).enumerate() {
+            if codec == Codec::Zero || i % 2 == 0 {
+                chunk.fill(0);
+            }
+        }
+        fs::write(&source, &raw).unwrap();
+        let mut p = plan();
+        p.codec = if codec == Codec::Zero {
+            Codec::Zstd
+        } else {
+            codec
+        };
+        p.compression_level = match p.codec {
+            Codec::Raw => 0,
+            Codec::Gzip => 6,
+            _ => 3,
+        };
+        backup::backup(
+            &source,
+            &archive,
+            p,
+            t.path(),
+            &NoEvents,
+            &NoHooks,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let csv = fs::read_to_string(archive.join("files.csv")).unwrap();
+        assert!(csv.contains(codec.name()), "{codec:?}: {csv}");
+        verify::verify(&archive, t.path(), &NoEvents).unwrap();
+        let target = t.path().join("target");
+        restore::restore(&archive, &target, false, t.path(), &NoEvents, &NoHooks).unwrap();
+        assert_eq!(fs::read(target).unwrap(), raw, "{codec:?}");
+    }
+}
