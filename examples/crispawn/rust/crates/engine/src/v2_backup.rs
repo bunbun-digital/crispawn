@@ -737,6 +737,10 @@ fn run_inner(
             .map(|f| f.raw)
             .sum::<u64>();
     report.read = report.durable;
+    if plan.segmented_storage {
+        // Resume prefixes were checked before run_inner; count each only once.
+        storage.credit_source(report.durable);
+    }
     report.stored = journal
         .state
         .sealed
@@ -985,17 +989,17 @@ fn run_inner(
                         hooks.at("before_data_write")?;
                         hooks.at("destination_space_check")?;
                         crate::destination_space::check(root)?;
-                        storage::write_all(
+                        storage::write_frame(
                             &mut f.file,
                             &format::Frame {
                                 codec: ready.encoded.codec,
                                 level: ready.encoded.level,
                                 raw_bytes: ready.raw.len() as u64,
                                 payload_bytes: ready.encoded.payload.len() as u32,
-                            }
-                            .encode(plan.format_version),
+                            },
+                            plan.format_version,
+                            &ready.encoded.payload,
                         )?;
-                        storage::write_all(&mut f.file, &ready.encoded.payload)?;
                         f.raw += ready.raw.len() as u64;
                         f.frames += 1;
                         f.end += record_bytes;

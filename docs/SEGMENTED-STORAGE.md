@@ -103,9 +103,19 @@ one-second samples, not the initial RAM-prefetch rate averaged over the whole co
 Elapsed copy time is displayed as hours, minutes and seconds beside the ETA;
 it includes pauses and continues updating during an I/O wait.
 
-The saved-data confirmation bar uses compressed bytes checked / bytes written;
-the source-copy bar retains original-data units. No partial physical-file hash
-match is represented as whole-disk completion. A RAM observer refreshes phases
+The confirmation bar uses the original source disk size as its denominator,
+like the source-copy bar. Each compressed frame with `R` original bytes and `C`
+payload bytes earns `floor(R * checked_payload_bytes / C)` source-byte equivalents.
+Accumulate the differences at each checked physical part, separately for each
+frame, so changing compression ratios and rounding do not distort or lose progress.
+For example, 100 MB compressed to 10 MB earns 10 MB of source-equivalent progress
+when 1 MB is stored and checked. File headers/footers do not earn progress; a
+zero frame earns its source range when its payload-free frame header is checked.
+Credit is published after readback and descriptor persistence, never merely
+because data is queued or written. Resume credits already checked prefixes once.
+This is a progress conversion, not a claim that partial compressed data has been
+decompressed and checked against the original. Actual compressed byte counts
+remain in diagnostic telemetry. A RAM observer refreshes phases
 and elapsed wait time independently of blocked writer calls. It does not invent
 completed bytes or extend the I/O deadline from a UI heartbeat alone.
 

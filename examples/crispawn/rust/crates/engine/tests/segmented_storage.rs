@@ -11,6 +11,22 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
 };
+#[derive(Default)]
+struct Progress(std::sync::Mutex<Vec<u64>>);
+impl crispawn_core::types::EventSink for Progress {
+    fn emit(&self, _: crispawn_core::types::Snapshot) {}
+    fn storage_progress(&self, _: &str, s: &crispawn_core::live::StorageStatus) {
+        self.0.lock().unwrap().push(s.confirmed_source_bytes);
+    }
+}
+impl Progress {
+    fn check(&self, total: u64) {
+        let p = self.0.lock().unwrap();
+        assert_eq!(p.last(), Some(&total));
+        assert!(p.windows(2).all(|v| v[0] <= v[1]));
+        assert!(p.iter().all(|&v| v <= total));
+    }
+}
 fn plan() -> Plan {
     Plan {
         format_version: 3,
@@ -54,18 +70,20 @@ fn one_compression_frame_spans_independently_checked_physical_files_and_restores
     let archive = t.path().join("archive");
     let raw = bytes();
     fs::write(&source, &raw).unwrap();
+    let progress = Progress::default();
     let r = backup::backup(
         &source,
         &archive,
         plan(),
         t.path(),
-        &NoEvents,
+        &progress,
         &NoHooks,
         &AtomicBool::new(false),
     )
     .unwrap();
     assert!(r.dataset_committed);
     assert_eq!(r.verification_kind, "compressed_blake3");
+    progress.check(raw.len() as u64);
     let pieces = parts(&archive);
     assert!(pieces.len() >= 3);
     assert!(pieces
@@ -155,15 +173,17 @@ fn interrupted_segmented_archives_resume_without_deleting_already_written_parts(
         } else {
             vec![]
         };
+        let progress = Progress::default();
         backup::resume(
             &source,
             &archive,
             t.path(),
-            &NoEvents,
+            &progress,
             &NoHooks,
             &AtomicBool::new(false),
         )
         .unwrap_or_else(|e| panic!("{point}: {e}"));
+        progress.check(raw.len() as u64);
         assert!(old.iter().all(|p| p.exists()));
         let restored = t.path().join("restored");
         restore::restore(&archive, &restored, false, t.path(), &NoEvents, &NoHooks).unwrap();

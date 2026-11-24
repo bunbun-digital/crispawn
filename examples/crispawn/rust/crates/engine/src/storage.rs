@@ -145,6 +145,7 @@ impl Shared {
                     write_workers: 1,
                     written_bytes: 0,
                     confirmed_bytes: 0,
+                    confirmed_source_bytes: 0,
                     phase_elapsed_ms: 0,
                     read_mb_per_second: 0.0,
                     write_mb_per_second: 0.0,
@@ -195,6 +196,10 @@ impl Shared {
     }
     pub fn input(&self, bytes: u64) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).input = bytes;
+    }
+    pub fn credit_source(&self, bytes: u64) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.status.confirmed_source_bytes = s.status.confirmed_source_bytes.saturating_add(bytes);
     }
     fn buffered(&self, added: u64, removed: u64) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -347,6 +352,7 @@ pub(crate) struct DataFile {
     file: File,
     manifest: Option<Manifest>,
     buffer: Vec<u8>,
+    buffer_source_bytes: u64,
     position: u64,
     shared: Option<Arc<Shared>>,
     last_flush: Instant,
@@ -427,6 +433,7 @@ impl DataFile {
             file,
             manifest,
             buffer: vec![],
+            buffer_source_bytes: 0,
             position: 0,
             shared: None,
             last_flush: Instant::now(),
@@ -468,6 +475,7 @@ impl DataFile {
             file,
             manifest,
             buffer: vec![],
+            buffer_source_bytes: 0,
             position: 0,
             shared: Some(shared),
             last_flush: Instant::now(),
@@ -590,6 +598,9 @@ impl DataFile {
             self.dirty = true;
             shared.stage("SAVING_METADATA", size);
             self.persist()?;
+            // Only a synced, checked part with a persisted mapping earns credit.
+            shared.credit_source(self.buffer_source_bytes);
+            self.buffer_source_bytes = 0;
             shared.calibrate(size, started.elapsed().as_secs_f64());
             shared.buffered(0, size);
             self.last_flush = Instant::now();
@@ -612,7 +623,10 @@ impl DataFile {
             io::sync_file(&self.file)
         }
     }
-    pub fn write_all(&mut self, mut bytes: &[u8]) -> Result<()> {
+    pub fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
+        self.write_with_source(bytes, 0)
+    }
+    fn write_with_source(&mut self, mut bytes: &[u8], raw_bytes: u64) -> Result<()> {
         if self.manifest.is_none() {
             return io::write_all(&mut self.file, bytes);
         }
@@ -622,6 +636,8 @@ impl DataFile {
             "segmented writes must append",
         )?;
         let shared = self.shared.as_ref().unwrap().clone();
+        let total = bytes.len() as u64;
+        let mut processed = 0u64;
         while !bytes.is_empty() {
             shared.check()?;
             if self.due() {
@@ -634,6 +650,10 @@ impl DataFile {
                 continue;
             }
             self.buffer.extend_from_slice(&bytes[..n]);
+            let end = processed + n as u64;
+            self.buffer_source_bytes += source_equivalent(raw_bytes, end, total)
+                - source_equivalent(raw_bytes, processed, total);
+            processed = end;
             self.position += n as u64;
             shared.buffered(n as u64, 0);
             bytes = &bytes[n..];
@@ -661,6 +681,7 @@ impl DataFile {
             });
             m.bytes = len;
             self.buffer.clear();
+            self.buffer_source_bytes = 0;
             self.position = len;
             self.dirty = true;
             self.persist()
@@ -788,6 +809,27 @@ impl io::Reader for DataFile {
 pub(crate) fn write_all(file: &mut DataFile, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes)
 }
+fn source_equivalent(raw: u64, processed: u64, encoded: u64) -> u64 {
+    (u128::from(raw) * u128::from(processed) / u128::from(encoded)) as u64
+}
+/// Headers/footers do not earn source progress. A zero frame has no payload,
+/// so its checked frame header represents the original zero-filled range.
+pub(crate) fn write_frame(
+    file: &mut DataFile,
+    frame: &crate::v2_format::Frame,
+    version: u32,
+    payload: &[u8],
+) -> Result<()> {
+    file.write_with_source(
+        &frame.encode(version),
+        if payload.is_empty() {
+            frame.raw_bytes
+        } else {
+            0
+        },
+    )?;
+    file.write_with_source(payload, frame.raw_bytes)
+}
 
 #[cfg(test)]
 mod tests {
@@ -797,6 +839,55 @@ mod tests {
         assert_eq!(Shared::calibrated_size(1 << 20, 4.0), 1 << 20);
         assert_eq!(Shared::calibrated_size(1 << 20, 1000.0), MIN);
         assert_eq!(Shared::calibrated_size(1 << 20, 0.001), MAX);
+    }
+    #[test]
+    fn checked_parts_credit_proportional_source_bytes_and_keep_rounding_remainders() {
+        assert_eq!(
+            source_equivalent(100_000_000, 1_000_000, 10_000_000),
+            10_000_000
+        );
+        assert_eq!(source_equivalent(u64::MAX, 1, u64::MAX), 1);
+        let (_t, s, mut f) = fixture();
+        // Two whole parts are checked, but the frame's last 13 bytes remain in RAM.
+        let encoded = vec![7; (2 << 20) + 13];
+        let raw = 100_000_007;
+        f.write_with_source(&encoded, raw).unwrap();
+        let partial = s.snapshot();
+        assert_eq!(partial.confirmed_bytes, 2 << 20);
+        assert_eq!(
+            partial.confirmed_source_bytes,
+            source_equivalent(raw, 2 << 20, encoded.len() as u64)
+        );
+        f.sync().unwrap();
+        assert_eq!(s.snapshot().confirmed_source_bytes, raw);
+        // The next frame has a different compression ratio; never use a global ratio.
+        f.write_with_source(&vec![3; 700_003], 2_000_009).unwrap();
+        assert_eq!(s.snapshot().confirmed_source_bytes, raw);
+        f.sync().unwrap();
+        assert_eq!(s.snapshot().confirmed_source_bytes, raw + 2_000_009);
+        // Container metadata earns no source-byte credit.
+        f.write_all(&[0; 77]).unwrap();
+        f.sync().unwrap();
+        assert_eq!(s.snapshot().confirmed_source_bytes, raw + 2_000_009);
+    }
+    #[test]
+    fn zero_frame_earns_original_bytes_only_after_its_header_is_checked() {
+        let (_t, s, mut f) = fixture();
+        write_frame(
+            &mut f,
+            &crate::v2_format::Frame {
+                codec: types::Codec::Zero,
+                level: 0,
+                raw_bytes: 100_000_000,
+                payload_bytes: 0,
+            },
+            3,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(s.snapshot().confirmed_source_bytes, 0);
+        f.sync().unwrap();
+        assert_eq!(s.snapshot().confirmed_source_bytes, 100_000_000);
     }
     #[test]
     fn elapsed_time_does_not_depend_on_completed_writes() {
@@ -914,10 +1005,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            f.write_all(&vec![7; 1 << 20]).unwrap_err().code,
+            f.write_with_source(&vec![7; 1 << 20], 100_000_000)
+                .unwrap_err()
+                .code,
             "STORED_HASH_MISMATCH"
         );
         assert_eq!(s.snapshot().confirmed_blocks, 0);
+        assert_eq!(s.snapshot().confirmed_source_bytes, 0);
         assert!(DataFile::read(&f.path, true)
             .unwrap()
             .manifest

@@ -548,7 +548,12 @@ impl<'a> View<'a> {
         let snap = s.snapshot.as_ref();
         let read = snap.map(|x| x.read_raw_bytes).unwrap_or(0);
         let durable = snap.map(|x| x.durable_raw_bytes).unwrap_or(0);
-        let verified = snap.map(|x| x.verified_raw_bytes).unwrap_or(0);
+        let verified = if mode == Mode::Backup {
+            s.storage.as_ref().map(|v| v.confirmed_source_bytes)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| snap.map(|x| x.verified_raw_bytes).unwrap_or(0));
         let current_total = snap.map(|x| x.total_bytes).unwrap_or(s.source_bytes);
         let total = v.total_bytes.max(current_total);
         let done = v.previous_durable_bytes.saturating_add(durable).min(total);
@@ -760,20 +765,6 @@ impl<'a> View<'a> {
         self.destination.text(&destination)?;
         if mode == Mode::Backup {
             if let Some(st) = &s.storage {
-                self.confirmed.text(&format!(
-                    "{}    {}% · {} / {}",
-                    l.text(T::StorageConfirmed),
-                    percentage(st.confirmed_bytes, st.written_bytes),
-                    model::capacity(st.confirmed_bytes),
-                    model::capacity(st.written_bytes)
-                ))?;
-                self.confirmed_exact.text(&format!(
-                    "{} / {}",
-                    model::exact(st.confirmed_bytes),
-                    model::exact(st.written_bytes)
-                ))?;
-                self.confirmed_bar
-                    .bar(1000, ratio(st.confirmed_bytes, st.written_bytes))?;
                 self.tail.text(&l.storage_summary(st))?;
             } else {
                 self.tail

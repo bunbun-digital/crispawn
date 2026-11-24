@@ -630,17 +630,17 @@ pub(super) fn copy(
                 hooks.at("before_data_write")?;
                 hooks.at("destination_space_check")?;
                 crate::destination_space::check(root)?;
-                storage::write_all(
+                storage::write_frame(
                     &mut f.file,
                     &format::Frame {
                         codec: frame.encoded.codec,
                         level: frame.encoded.level,
                         raw_bytes: frame.raw_bytes,
                         payload_bytes: frame.encoded.payload.len() as u32,
-                    }
-                    .encode(plan.format_version),
+                    },
+                    plan.format_version,
+                    &frame.encoded.payload,
                 )?;
-                storage::write_all(&mut f.file, &frame.encoded.payload)?;
                 f.raw += frame.raw_bytes;
                 f.frames += 1;
                 f.end += record_bytes;

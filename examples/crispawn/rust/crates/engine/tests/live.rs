@@ -42,6 +42,7 @@ fn storage_progress_is_visible_without_a_new_writer_snapshot_and_formats_both_la
         write_workers: 1,
         written_bytes: 400000000,
         confirmed_bytes: 396000000,
+        confirmed_source_bytes: 3960000000,
         phase_elapsed_ms: 3100,
         read_mb_per_second: 35.2,
         write_mb_per_second: 1.7,
@@ -85,6 +86,8 @@ fn storage_progress_is_visible_without_a_new_writer_snapshot_and_formats_both_la
             && text.contains("MB/秒")
             && text.contains("00:02:05")
     );
+    assert!(text.contains("3,960,000,000 bytes") && text.contains("256.0 GB"));
+    assert!(!text.contains("保存データの確認（圧縮後）"));
     assert!(Language::En
         .storage_summary(&storage)
         .contains("Write workers 1"));

@@ -144,18 +144,22 @@ pub fn render(s: &Status, input: &Interaction, logs: &str) -> Result<String> {
                 ));
                 text.push_str(&l.storage_summary(storage));
                 text.push('\n');
-                text.push_str(&format!(
-                    "{}: {} / {} bytes\n",
-                    l.text(T::StorageConfirmed),
-                    storage.confirmed_bytes,
-                    storage.written_bytes
-                ));
             }
             if let Some(p) = &s.snapshot {
                 for (key, n) in [
                     (T::Read, p.read_raw_bytes),
                     (T::Durable, p.durable_raw_bytes),
-                    (T::Confirmed, p.verified_raw_bytes),
+                    (
+                        T::Confirmed,
+                        if v.mode == crispawn_core::presentation::Mode::Backup {
+                            s.storage
+                                .as_ref()
+                                .map(|v| v.confirmed_source_bytes)
+                                .unwrap_or(p.verified_raw_bytes)
+                        } else {
+                            p.verified_raw_bytes
+                        },
+                    ),
                 ] {
                     text.push_str(&format!(
                         "{}: {} ({}) / {} ({})\n",
