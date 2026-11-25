@@ -35,6 +35,7 @@ impl CpuPool {
     }
 
     pub fn update(&self, hash: &mut blake3::Hasher, bytes: &[u8]) {
+        let _trace = crate::io_trace::span(crate::io_trace::Op::Hash, bytes.len() as u64);
         self.pool.install(|| {
             hash.update_rayon(bytes);
         });

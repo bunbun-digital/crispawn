@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 
 from crispawn_qemu import run_guest
-from crispawn_log_evidence import verify_log_directory
+from crispawn_log_evidence import verify_log_directory, extract_io_trace, extract_segmented_parts
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -129,12 +129,17 @@ def main():
             for row in csv.DictReader(stream):
                 name=row['relative_path']; assert re.fullmatch(r'data/data-[0-9]{6}\.pbk',name)
                 (archive/name).write_bytes(cat('/'+disk['archive']+'/'+name))
+        extract_segmented_parts(archive, cat, '/'+disk['archive']+'/')
         verify_env=dict(os.environ,PYTHONPATH=str(ROOT/'build/verifier-libs'))
         r=subprocess.run(['python3',ROOT/'tools/check-crispawn-format.py',archive,'--source-file',source],env=verify_env,capture_output=True,text=True,timeout=120)
         (copy/'independent-verification.log').write_text(r.stdout+r.stderr); assert r.returncode==0,r.stderr
         for directory in listing('/crispawn/logs'):
             folder=copy/'logs'/directory; folder.mkdir(parents=True)
             for name in listing('/crispawn/logs/'+directory):
+                if name == 'io-observer':
+                    extract_io_trace(listing, cat, '/crispawn/logs/'+directory+'/'+name, folder/name,
+                                     require_copy=True, source_bytes=source.stat().st_size)
+                    continue
                 assert re.fullmatch(r'(events-[0-9]+\.jsonl|log-info\.json|probe-final\.json)',name)
                 (folder/name).write_bytes(cat('/crispawn/logs/'+directory+'/'+name))
             verify_log_directory(folder)

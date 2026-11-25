@@ -312,6 +312,8 @@ def required_capabilities(runtime):
         result.add('failure.' + runtime['failure']['action'])
     if 'verify_after_write' in runtime['processing']:
         result.add('processing.verify_after_write')
+    if 'io_observer' in runtime['diagnostics']:
+        result.add('diagnostics.io_observer')
     destination = runtime['destination']
     if destination['kind'] == 'usb_disk' and destination['volume']['mode'] == 'uuid':
         result.add('destination.usb_disk.uuid')
@@ -330,6 +332,7 @@ def legacy_v1(runtime):
     validate(runtime)
     require(runtime['kind'] == 'crispawn.live', 'RUNTIME_REQUIRED')
     require('failure' not in runtime, 'NOT_REPRESENTABLE_IN_V1')
+    require('io_observer' not in runtime['diagnostics'], 'NOT_REPRESENTABLE_IN_V1')
     require(runtime['processing'].get('verify_after_write', True), 'NOT_REPRESENTABLE_IN_V1')
     require(runtime['destination']['kind'] == 'usb_disk'
             and runtime['destination']['volume']['mode'] == 'boot_disk_data'

@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import tempfile
 from crispawn_qemu import run_guest
-from crispawn_log_evidence import verify_log_directory
+from crispawn_log_evidence import verify_log_directory, extract_io_trace, extract_segmented_parts
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,12 +39,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--iso', required=True, type=Path)
     parser.add_argument('--work', required=True, type=Path)
+    parser.add_argument('--images-dir', type=Path,
+                        help='new directory for ordinary backing files, separate from evidence')
     parser.add_argument('--cases', nargs='+', default=['secure', 'restore', 'uefi', 'bios', 'missing-uuid', 'usb'],
                         choices=['secure', 'restore', 'uefi', 'bios', 'missing-uuid', 'usb'])
     args = parser.parse_args()
     assert 'restore' not in args.cases or 'secure' in args.cases
     output = args.work.resolve()
     output.mkdir(parents=True, exist_ok=False)
+    images = args.images_dir or output
+    if args.images_dir:
+        images.mkdir(parents=True, exist_ok=False)
     assert shutil.disk_usage(output).free > 12 << 30
     state = dict(phase='preparing', iso_sha256=digest(args.iso), results=[],
                  hyperv_tested=False, physical_cd_tested=False, custom_keys_enrolled=False)
@@ -71,13 +76,13 @@ def main():
         assert set(state['platforms']) == {'BIOS', 'UEFI'}
         # This USB disk deliberately has no ESP and no boot loader: an optical
         # success cannot be explained by firmware falling back to USB boot.
-        data_disk = output / 'data-only-usb.img'
+        data_disk = images / 'data-only-usb.img'
         offset, total = 1 << 20, 2048 << 20
         length = total - 2 * offset
         with data_disk.open('xb') as stream:
             stream.truncate(total)
         command(['sfdisk', data_disk], input=f'label: gpt\nunit: sectors\nstart=2048,size={length//512},type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7\n'.encode())
-        ntfs = output / 'initial-ntfs.img'
+        ntfs = images / 'initial-ntfs.img'
         with ntfs.open('xb') as stream:
             stream.truncate(length)
         command([host / 'usr/sbin/mkntfs', '-Q', '-F', '-L', 'CRISPAWN', '-s', '512', '-c', '4096',
@@ -87,7 +92,7 @@ def main():
         volume = f'{int.from_bytes(sector[72:80], "little"):016X}'
         state['destination_uuid'] = volume
         usb.sparse_copy(ntfs, data_disk, offset=offset)
-        source = output / 'source.img'
+        source = images / 'source.img'
         with source.open('xb') as stream:
             stream.truncate(128 << 20)
             stream.write(random.Random(221610).randbytes(8 << 20))
@@ -173,6 +178,9 @@ def main():
                     saved = logs / directory
                     saved.mkdir()
                     for name in listing('/crispawn/logs/' + directory):
+                        if name == 'io-observer':
+                            extract_io_trace(listing, cat, '/crispawn/logs/' + directory + '/' + name, saved / name)
+                            continue
                         assert re.fullmatch(r'(events-[0-9]+\.jsonl|log-info\.json|probe-final\.json)', name)
                         data = cat('/crispawn/logs/' + directory + '/' + name)
                         (saved / name).write_bytes(data)
@@ -205,6 +213,7 @@ def main():
                                 name = row['relative_path']
                                 assert re.fullmatch(r'data/data-[0-9]{6}\.pbk', name)
                                 (archive / name).write_bytes(cat('/' + archive_path + '/' + name))
+                        extract_segmented_parts(archive, cat, '/' + archive_path + '/')
                         verify_env = dict(os.environ, PYTHONPATH=str(ROOT / 'build/verifier-libs'))
                         result = subprocess.run(['python3', ROOT / 'tools/check-crispawn-format.py', archive, '--source-file', source],
                                                 env=verify_env, capture_output=True, timeout=120)

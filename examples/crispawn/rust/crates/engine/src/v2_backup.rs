@@ -877,7 +877,13 @@ fn run_inner(
                                 hooks.at("source_read")?;
                                 let mut raw = vec![0; length as usize];
                                 let read_start = std::time::Instant::now();
-                                io::read_exact_at(source, &mut raw, offset, read_bytes)?;
+                                {
+                                    let _trace = crate::io_trace::span(
+                                        crate::io_trace::Op::SourceRead,
+                                        raw.len() as u64,
+                                    );
+                                    io::read_exact_at(source, &mut raw, offset, read_bytes)?;
+                                }
                                 let read_seconds = read_start.elapsed().as_secs_f64();
                                 hooks.at("codec_encode")?;
                                 let encode_start =

@@ -136,6 +136,58 @@ Ordinary-file tests cover producer progress during a held writer checkpoint,
 per-file BLAKE3/restore, interrupted resume, read and write failures, bounded
 queue backpressure, cancellation and independent failure-file persistence.
 These establish software behavior, not USB hardware health or throughput.
-The physical report that triggered this work contained no terminal failure code;
-its exact blocked operation and hardware cause remain unproven. No new VM or
-physical-device reproduction is implied by these tests.
+The supplied failure record identifies `DIAGNOSTIC_LOG_STALLED`: destination
+logging did not drain within the former ten-second queue deadline. That queue
+failure is distinct from the underlying slow I/O. The older measurements cannot
+identify whether NTFS metadata, kernel writeback or device-internal work caused
+that wait. Native tests and VM observations are recorded separately and do not
+establish a physical-device reproduction or a physical USB throughput fix.
+
+
+## Independent diagnostic collection and temporary I/O observer
+
+A destination log mirror runs separately from RAM log collection and the backup
+workers. Producers never wait for NTFS logging. Both queues are bounded. The
+destination backlog is capped by the configured RAM log capacity and 8192
+records. If it overflows, retain recent records, increment `dropped_records`,
+and write an explicit `log_gap` when output resumes. Backpressure alone does not
+raise WORKER_FAILED; actual log I/O errors are still reported. Final/error close
+drains the mirror. Under CLI/Live supervision, real destination I/O progress and
+the configured stall policy govern that wait, rather than a separate ten-second
+log-queue deadline. Standalone unsupervised library controls remain bounded.
+
+The temporary `diagnostics.io_observer` boolean defaults to `true` in this
+investigation build. Set it to `false` to disable the additional process. It is
+additive to runtime v2 and advertised as `diagnostics.io_observer`; it is not a
+network service. See `config/crispawn/examples/live-v2-usb-io-diagnostics.json`.
+
+Worker threads publish active operations and cumulative inclusive durations to
+a fixed RAM mapping. A separate `crispawn-live observe-io` process samples once
+per second into an 8 MiB rolling RAM history at `/run/crispawn/io-observer/`.
+The process does not write to NTFS during copying. Normal continuous logs also
+receive its latest sample periodically. Requested byte counts and inclusive wall
+times are not completed media bytes or CPU utilization; nested durations overlap.
+
+Samples distinguish source reads, BLAKE3, compression, writer-queue/receipt waits,
+directory checks, file creation, data writes, stored-byte readback, descriptor
+publication, rename, log append, free-space checks, file sync and filesystem sync.
+They include worker/observer PIDs, active TIDs, elapsed operation time, task state,
+`wchan`, syscall, and up to two bounded kernel stacks for long-running operations.
+The sample also records process CPU/I/O counters, dirty/writeback memory, actual
+writeback-limit settings, I/O pressure, partition I/O counters and available USB
+protocol/speed/queue attributes. Permission-denied or unavailable kernel details
+are recorded; the observer does not alter Secure Boot, kernel restrictions,
+writeback settings, the device or firmware. NAND-internal garbage collection
+cannot be conclusively identified without device telemetry.
+
+On normal completion, the full retained trace is copied under the generated
+`crispawn/logs/<job>-complete-<suffix>/io-observer/` folder. `final.json` and
+`finished.json` record the observer's final snapshot and normal exit before
+unmount. Failure persistence independently attempts to include the latest RAM
+sample in `failure.json`, alongside a 16 KiB kernel-message tail, with a bounded
+64 KiB failure record. RAM-only evidence cannot survive an external power cut.
+
+Native tests block the actual continuous-log write syscall for more than ten
+seconds, complete a real ordinary-file copy in parallel, then test full-history
+recovery and bounded backlog overflow. QEMU evidence is recorded separately;
+neither native fixtures nor virtual disks prove a physical USB throughput fix.

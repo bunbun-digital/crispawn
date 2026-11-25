@@ -66,7 +66,7 @@ def main():
     settings = args.work / 'crispawn-config.json'
     settings.write_text(json.dumps(config) + '\n')
     image = args.images_dir / 'usb.img'
-    media = usb.create(args.iso, settings, image, args.work / 'media', 4096, ROOT / 'build/signed-profile')
+    media = usb.create(args.iso, settings, image, args.images_dir / 'media', 4096, ROOT / 'build/signed-profile')
     (args.work / 'media.json').write_text(json.dumps(media, indent=2) + '\n')
     sockets = Path(tempfile.mkdtemp(prefix='cp-cache-qemu-'))
     guest = args.work / 'guest'

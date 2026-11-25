@@ -80,6 +80,7 @@ fn retry<T>(sync: bool, mut operation: impl FnMut() -> Result<T>) -> Result<T> {
 }
 
 pub fn write_all(writer: &mut (impl Write + ?Sized), mut bytes: &[u8]) -> Result<()> {
+    let _trace = crate::io_trace::span_if_idle(crate::io_trace::Op::Write, bytes.len() as u64);
     while !bytes.is_empty() {
         let count = retry(false, || writer.write(bytes).map_err(Error::from))?;
         require(
@@ -96,6 +97,7 @@ pub fn sync_file(file: &File) -> Result<()> {
     if DEFER_SYNC.with(Cell::get) {
         return Ok(());
     }
+    let _trace = crate::io_trace::span(crate::io_trace::Op::FileSync, 0);
     // EIO from writeback can mean previously accepted data was lost. A later
     // successful fsync alone cannot certify recovery; do not hide that error.
     retry(true, || file.sync_all().map_err(Error::from))?;
@@ -105,6 +107,7 @@ pub fn sync_file(file: &File) -> Result<()> {
 /// Flush data and metadata once after all copy workers/receipts are complete.
 /// Never retry a writeback EIO into an apparent successful commit.
 pub(crate) fn sync_filesystem(file: &File) -> Result<()> {
+    let _trace = crate::io_trace::span(crate::io_trace::Op::FilesystemSync, 0);
     retry(true, || {
         // SAFETY: file owns a valid descriptor for the destination filesystem.
         if unsafe { libc::syncfs(file.as_raw_fd()) } == 0 {
@@ -151,6 +154,7 @@ impl Reader for File {
 /// Hint that their clean cached pages need not compete with destination cache.
 /// This best-effort hint never syncs, changes data or operates on output files.
 pub(crate) fn release_source_cache(source: &File, offset: u64, length: u64) {
+    let _trace = crate::io_trace::span(crate::io_trace::Op::SourceCache, length);
     if length == 0 || offset > i64::MAX as u64 || length > i64::MAX as u64 {
         return;
     }
@@ -171,6 +175,7 @@ pub fn read_exact_at(
     mut offset: u64,
     request: u64,
 ) -> Result<()> {
+    let _trace = crate::io_trace::span_if_idle(crate::io_trace::Op::Read, buffer.len() as u64);
     require(
         request > 0 && request <= usize::MAX as u64,
         "INVALID_READ_SIZE",
@@ -292,6 +297,7 @@ pub fn sync_dir(path: &Path) -> Result<()> {
     sync_file(&retry(false, || File::open(path).map_err(Error::from))?)
 }
 pub fn create_new(path: &Path) -> Result<File> {
+    let _trace = crate::io_trace::span(crate::io_trace::Op::Create, 0);
     Ok(OpenOptions::new()
         .create_new(true)
         .read(true)
@@ -341,13 +347,19 @@ pub fn hash_file(file: &File) -> Result<String> {
     Ok(hex(&h.finalize()))
 }
 pub fn atomic_write(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
-    let mut temp = tempfile::Builder::new()
-        .prefix(".pbk-write-")
-        .tempfile_in(root)?;
+    let mut temp = {
+        let _trace = crate::io_trace::span(crate::io_trace::Op::Create, 0);
+        tempfile::Builder::new()
+            .prefix(".pbk-write-")
+            .tempfile_in(root)?
+    };
     write_all(&mut temp, bytes)?;
     sync_file(temp.as_file())?;
-    temp.persist(root.join(name))
-        .map_err(|e| Error::from(e.error))?;
+    {
+        let _trace = crate::io_trace::span(crate::io_trace::Op::Rename, 0);
+        temp.persist(root.join(name))
+            .map_err(|e| Error::from(e.error))?;
+    }
     sync_dir(root)
 }
 /// Atomic seal that never replaces an existing data container.
@@ -421,6 +433,7 @@ pub fn lock_file(file: &File, exclusive: bool) -> Result<()> {
     Ok(())
 }
 pub fn available_bytes(path: &Path) -> Result<u64> {
+    let _trace = crate::io_trace::span(crate::io_trace::Op::FreeSpace, 0);
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     let p =
         CString::new(path.as_os_str().as_bytes()).map_err(|_| Error::new("INVALID_PATH", "NUL"))?;
@@ -485,6 +498,10 @@ pub fn source_preflight(reader: &dyn Reader, bytes: u64) -> Result<()> {
     ];
     offsets.sort_unstable();
     offsets.dedup();
+    let _trace = crate::io_trace::span(
+        crate::io_trace::Op::SourceRead,
+        length as u64 * offsets.len() as u64,
+    );
     let mut buffer = vec![0; length];
     for offset in offsets {
         read_exact_at(reader, &mut buffer, offset, 4096).map_err(|error| {
@@ -547,6 +564,17 @@ impl Lock {
         self.0.metadata().is_ok()
     }
 }
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // A simultaneous fork can briefly inherit the open file description,
+        // despite CLOEXEC. End this guard's lease explicitly rather than waiting
+        // for every inherited descriptor to close after exec. Lock is not Clone.
+        // SAFETY: the guard still owns a valid descriptor; unlock never blocks.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
 pub fn canonical_archive(path: &Path) -> Result<PathBuf> {
     let m = fs::symlink_metadata(path)?;
     require(
@@ -568,6 +596,17 @@ pub fn canonical_archive(path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[test]
+    fn archive_guard_releases_its_lease_even_if_a_fork_inherited_the_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(".lock"), b"").unwrap();
+        let guard = Lock::acquire(root.path(), true).unwrap();
+        let inherited = guard.0.try_clone().unwrap();
+        assert!(Lock::acquire(root.path(), true).is_err());
+        drop(guard);
+        let next = Lock::acquire(root.path(), true).unwrap();
+        assert!(next.held() && inherited.metadata().is_ok());
+    }
     #[test]
     fn a_second_fsync_cannot_hide_the_first_writeback_eio() {
         let calls = AtomicUsize::new(0);

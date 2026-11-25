@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const LIMIT: usize = 16 << 10;
+const LIMIT: usize = 64 << 10;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn kernel_tail() -> serde_json::Value {
@@ -34,8 +34,8 @@ fn kernel_tail() -> serde_json::Value {
                 Ok(0) => break,
                 Ok(count) => {
                     tail.extend_from_slice(&buffer[..count]);
-                    if tail.len() > 1024 {
-                        tail.drain(..tail.len() - 1024);
+                    if tail.len() > 16384 {
+                        tail.drain(..tail.len() - 16384);
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -52,7 +52,7 @@ fn kernel_tail() -> serde_json::Value {
     })();
     match result {
         Ok(text) => {
-            serde_json::json!({"available":true,"source":"/dev/kmsg","tail_bytes_cap":1024,"text":text})
+            serde_json::json!({"available":true,"source":"/dev/kmsg","tail_bytes_cap":16384,"text":text})
         }
         Err(e) => serde_json::json!({"available":false,"source":"/dev/kmsg","error":e.to_string()}),
     }
@@ -213,6 +213,11 @@ pub(crate) fn child() -> Result<()> {
         )?;
         if let Some(record) = request.record.as_object_mut() {
             record.insert("kernel_diagnostics".into(), kernel_tail());
+            if let Ok(sample) = crate::io::read_json::<serde_json::Value>(
+                &Path::new(crate::live::RUNTIME).join("io-observer/latest.json"),
+            ) {
+                record.insert("io_observer".into(), sample);
+            }
             if let Ok(status) = crate::io::read_json::<crispawn_core::live::Status>(
                 &Path::new(crate::live::RUNTIME).join("status.json"),
             ) {

@@ -101,6 +101,7 @@ struct State {
     buffered: u64,
     input: u64,
     baseline: u64,
+    throughput_bps: Option<f64>,
     proofs: BTreeMap<PathBuf, (String, SourceIdentity)>,
     files: BTreeMap<u64, (SourceIdentity, String)>,
     active: BTreeMap<u64, (String, u64)>,
@@ -175,6 +176,7 @@ impl Shared {
                 buffered: 0,
                 input: 0,
                 baseline: FIRST,
+                throughput_bps: None,
                 proofs: BTreeMap::new(),
                 files: BTreeMap::new(),
                 active: BTreeMap::new(),
@@ -301,14 +303,28 @@ impl Shared {
         ((bytes as f64 * (GOAL * 0.8) / seconds.max(0.001)) as u64).clamp(MIN, MAX) / 4096 * 4096
     }
     fn calibrate(&self, bytes: u64, seconds: f64) {
+        let physical = crate::io_trace::destination_bps()
+            .map(|bps| bps / f64::from(crate::storage_worker::WORKERS));
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !s.status.calibrated {
-            s.baseline = Self::calibrated_size(bytes, seconds).min(self.capacity);
-            s.status.baseline_bytes = s.baseline;
             s.status.calibrated = true;
             s.status.calibration_bytes = bytes;
             s.status.calibration_elapsed_ms = (seconds * 1000.0).round() as u64;
         }
+        // Tiny/cached admissions do not measure a USB device's sustained speed.
+        // Prefer completed block I/O; fall back to nontrivial part service times
+        // for ordinary-file adapters. Never add another destructive trial write.
+        if let Some(rate) = physical.or_else(|| {
+            (bytes >= FIRST / 4 && seconds >= 0.05).then_some(bytes as f64 / seconds.max(0.001))
+        }) {
+            let rate = s
+                .throughput_bps
+                .map_or(rate, |old| (old * 0.75 + rate * 0.25).min(rate * 2.0));
+            s.throughput_bps = Some(rate);
+            let target = Self::calibrated_size(rate as u64, 1.0).min(self.capacity);
+            s.baseline = target.min(s.baseline.saturating_mul(2)).max(MIN);
+        }
+        s.status.baseline_bytes = s.baseline;
     }
     pub fn snapshot(&self) -> StorageStatus {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -471,28 +487,48 @@ impl WriteContext {
     fn store(&self, job: u64, input: PartInput) -> Result<PartReceipt> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _deferred = io::DeferredSync::new(true);
+            crate::io_trace::elapsed(
+                crate::io_trace::Op::QueueWait,
+                input.started.elapsed(),
+                input.bytes.len() as u64,
+            );
             self.check()?;
             self.phase(job, "WRITING", input.bytes.len() as u64);
             let started = Instant::now();
             let expected = types::hex(&self.pool.hash(&input.bytes));
             let directory = input.path.parent().unwrap();
             for path in [directory.parent().unwrap(), directory] {
-                match fs::create_dir(path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        require(
-                            fs::symlink_metadata(path)?.is_dir(),
-                            "INVALID_STORAGE_PART",
-                            "storage directory is not an ordinary directory",
-                        )?;
+                let _trace = crate::io_trace::span(crate::io_trace::Op::Directory, 0);
+                match fs::symlink_metadata(path) {
+                    Ok(meta) => require(
+                        meta.is_dir(),
+                        "INVALID_STORAGE_PART",
+                        "storage directory is not an ordinary directory",
+                    )?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        match fs::create_dir(path) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                require(
+                                    fs::symlink_metadata(path)?.is_dir(),
+                                    "INVALID_STORAGE_PART",
+                                    "storage directory is not an ordinary directory",
+                                )?;
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(error) => return Err(error.into()),
                 }
             }
             self.hooks.at("before_segment_write")?;
             crate::destination_space::check(directory)?;
             let mut file = io::create_new(&input.path)?;
-            io::write_all(&mut file, &input.bytes)?;
+            {
+                let _trace =
+                    crate::io_trace::span(crate::io_trace::Op::DataWrite, input.bytes.len() as u64);
+                io::write_all(&mut file, &input.bytes)?;
+            }
             let write_ms = started.elapsed().as_millis() as u64;
             {
                 let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -503,6 +539,8 @@ impl WriteContext {
             }
             self.hooks.at("after_segment_write")?;
             let check_ms = if self.verify_after_write {
+                let _trace =
+                    crate::io_trace::span(crate::io_trace::Op::Readback, input.bytes.len() as u64);
                 self.phase(job, "CHECKING", input.bytes.len() as u64);
                 let checking = Instant::now();
                 verify_part(&file, &expected, &self.pool, || self.check())?;
@@ -526,7 +564,7 @@ impl WriteContext {
                     blake3: expected,
                 },
                 source_bytes: input.source_bytes,
-                service_seconds: input.started.elapsed().as_secs_f64(),
+                service_seconds: (write_ms + check_ms) as f64 / 1000.0,
             })
         }))
         .unwrap_or_else(|_| {
@@ -577,6 +615,8 @@ pub(crate) struct DataFile {
     position: u64,
     shared: Option<Arc<Shared>>,
     last_flush: Instant,
+    last_persist: Instant,
+    unpublished_parts: u32,
     dirty: bool,
     pending: VecDeque<PendingPart>,
     pending_bytes: u64,
@@ -660,6 +700,8 @@ impl DataFile {
             position: 0,
             shared: None,
             last_flush: Instant::now(),
+            last_persist: Instant::now(),
+            unpublished_parts: 0,
             dirty: false,
             pending: VecDeque::new(),
             pending_bytes: 0,
@@ -710,6 +752,8 @@ impl DataFile {
             position: 0,
             shared: Some(shared),
             last_flush: Instant::now(),
+            last_persist: Instant::now(),
+            unpublished_parts: 0,
             dirty: plan.segmented_storage,
             pending: VecDeque::new(),
             pending_bytes: 0,
@@ -732,7 +776,11 @@ impl DataFile {
     }
     fn persist(&mut self) -> Result<()> {
         if self.dirty {
+            let _trace = crate::io_trace::span(crate::io_trace::Op::DescriptorWrite, 0);
             let _deferred = io::DeferredSync::new(true);
+            if let Some(shared) = &self.shared {
+                shared.hooks.at("before_descriptor_write")?;
+            }
             let m = self.manifest.as_ref().unwrap();
             m.validate()?;
             let bytes = io::json(m)?;
@@ -748,6 +796,8 @@ impl DataFile {
             )?;
             self.file = crate::v2::open_owned(&self.path)?;
             self.dirty = false;
+            self.last_persist = Instant::now();
+            self.unpublished_parts = 0;
         }
         Ok(())
     }
@@ -757,6 +807,7 @@ impl DataFile {
         };
         let shared = self.shared.as_ref().unwrap().clone();
         let result = if wait {
+            let _trace = crate::io_trace::span(crate::io_trace::Op::ReceiptWait, pending.bytes);
             loop {
                 match pending
                     .receiver
@@ -810,9 +861,12 @@ impl DataFile {
         m.parts.push(completed.part);
         self.pending_bytes -= size;
         self.dirty = true;
+        self.unpublished_parts += 1;
         shared.stage("SAVING_METADATA", size);
         let started = Instant::now();
-        self.persist()?;
+        if self.unpublished_parts >= 8 || self.last_persist.elapsed() >= Duration::from_secs(2) {
+            self.persist()?;
+        }
         shared.credit_source(completed.source_bytes);
         shared.buffered(0, size);
         shared.calibrate(
@@ -1116,6 +1170,54 @@ mod tests {
         assert_eq!(Shared::calibrated_size(1 << 20, 4.0), 1 << 20);
         assert_eq!(Shared::calibrated_size(1 << 20, 1000.0), MIN);
         assert_eq!(Shared::calibrated_size(1 << 20, 0.001), MAX);
+    }
+    #[test]
+    fn cached_admission_is_conservative_and_later_slow_writes_resize_parts() {
+        let shared = Shared::new(&"1".repeat(32), 2).unwrap();
+        shared.calibrate(1 << 20, 0.002);
+        assert_eq!(shared.snapshot().baseline_bytes, FIRST);
+        for _ in 0..4 {
+            shared.calibrate(8 << 20, 0.5);
+        }
+        let fast = shared.snapshot().baseline_bytes;
+        assert!(fast > FIRST && fast <= MAX);
+        shared.calibrate(8 << 20, 200.0);
+        assert!(shared.snapshot().baseline_bytes < fast);
+        assert!(shared.snapshot().baseline_bytes >= MIN);
+    }
+    #[test]
+    fn descriptor_updates_are_batched_but_sync_publishes_all_checked_parts() {
+        use std::sync::atomic::AtomicUsize;
+        struct Count(AtomicUsize);
+        impl Hooks for Count {
+            fn at(&self, point: &'static str) -> Result<()> {
+                if point == "before_descriptor_write" {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }
+        }
+        let t = tempfile::tempdir().unwrap();
+        let mut shared = Shared::new(&"1".repeat(32), 2).unwrap();
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        Arc::get_mut(&mut shared).unwrap().hooks = count.clone();
+        let plan = Plan {
+            format_version: 3,
+            segmented_storage: true,
+            ..Plan::default()
+        };
+        let path = t.path().join("00000000.pbk.partial");
+        let mut file = DataFile::create(&path, &plan, &"1".repeat(32), 0, shared.clone()).unwrap();
+        file.write_all(&vec![0x53; 8 << 20]).unwrap();
+        file.sync().unwrap();
+        let manifest: Manifest = io::read_json(&path).unwrap();
+        assert_eq!(manifest.bytes, 8 << 20);
+        assert_eq!(
+            manifest.parts.len(),
+            shared.snapshot().written_blocks as usize
+        );
+        assert!(count.0.load(Ordering::Relaxed) < manifest.parts.len());
+        assert_eq!(shared.snapshot().confirmed_bytes, 8 << 20);
     }
     #[test]
     fn checked_parts_credit_proportional_source_bytes_and_keep_rounding_remainders() {

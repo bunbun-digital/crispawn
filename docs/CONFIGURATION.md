@@ -49,3 +49,13 @@ with media-layout schema 2, `boot_iso_path` `/crispawn.iso`, label `CRISPAWN`
 and top-level directory `crispawn`. The ISO belongs at the ESP root under that
 exact filename; see [the USB file layout specification](COMPATIBILITY.md#usb-media-layout-v2).
 
+
+
+Temporary I/O diagnostics are controlled by the optional boolean
+`diagnostics.io_observer`. This investigation build enables it when omitted.
+Builder configurations that omit the field therefore still collect diagnostics;
+set it to `false` to disable them. Explicit use requires the
+`diagnostics.io_observer` capability. The bounded RAM sampler is separate from
+the backup and NTFS log mirror. Normal USB log policy still applies to trace
+exports; no diagnostic network connection is added. See
+[the I/O diagnostic fields and storage paths](IO-PIPELINE.md#independent-diagnostic-collection-and-temporary-io-observer).

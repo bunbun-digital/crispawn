@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 
 from crispawn_qemu import run_guest
-from crispawn_log_evidence import verify_log_directory
+from crispawn_log_evidence import verify_log_directory, verify_io_trace
 
 ROOT = Path(__file__).resolve().parents[1]
 LAYOUT = {"kind": "crispawn.media_layout", "schema_version": 2,
@@ -37,6 +37,14 @@ def module(name, filename):
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
     return result
+
+
+def extract_io_trace(listing, cat, source, target, require_copy=False, source_bytes=0):
+    target.mkdir()
+    for name in listing(source):
+        assert re.fullmatch(r'(samples-[0-9]+\.jsonl|latest\.json|final\.json|finished\.json)', name)
+        (target / name).write_bytes(cat(source + '/' + name))
+    return verify_io_trace(target, require_copy=require_copy, source_bytes=source_bytes)
 
 
 def main():
@@ -189,6 +197,14 @@ def main():
                 name = row['relative_path']
                 assert re.fullmatch(r'data/data-[0-9]{6}\.pbk', name)
                 (archive / name).write_bytes(cat(prefix + name))
+                descriptor = json.loads((archive / name).read_bytes())
+                for part in descriptor.get('parts', []):
+                    relative = part['path']
+                    assert re.fullmatch(r'segments/[0-9a-f]{8}/[0-9a-f]{32}\.bin', relative)
+                    target = archive / 'data' / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open('xb') as stream:
+                        stream.write(cat(prefix + 'data/' + relative))
         verify_env = dict(os.environ, PYTHONPATH=str(ROOT / 'build/verifier-libs'))
         result = subprocess.run(['python3', ROOT / 'tools/check-crispawn-format.py', archive, '--source-file', source],
                                 env=verify_env, capture_output=True, timeout=120)
@@ -207,12 +223,18 @@ def main():
             folder = copied / 'logs' / directory
             folder.mkdir(parents=True)
             for name in listing('/crispawn/logs/' + directory):
+                if name == 'io-observer':
+                    state.setdefault('io_observer', []).append(extract_io_trace(listing, cat,
+                        '/crispawn/logs/' + directory + '/' + name, folder / name,
+                        require_copy=True, source_bytes=source.stat().st_size))
+                    continue
                 assert re.fullmatch(r'(events-[0-9]+\.jsonl|log-info\.json|probe-final\.json)', name)
                 data = cat('/crispawn/logs/' + directory + '/' + name)
                 (folder / name).write_bytes(data)
                 if name.startswith('events-'):
                     copy_records.extend(json.loads(line) for line in data.splitlines())
             verify_log_directory(folder)
+        assert state.get('io_observer'), 'missing independent I/O diagnostic evidence'
         assert any(r.get('kind') == 'usb_boot_iso_verified'
                    and r['value']['boot_iso_path'] == '/crispawn.iso'
                    and r['value']['path'].endswith('/crispawn.iso') for r in copy_records)
@@ -250,6 +272,14 @@ def main():
         for row in csv.DictReader((unsigned_archive / 'files.csv').open(newline='')):
             name = row['relative_path']; assert re.fullmatch(r'data/data-[0-9]{6}\.pbk', name)
             (unsigned_archive / name).write_bytes(unsigned_cat(unsigned_prefix + name))
+            descriptor = json.loads((unsigned_archive / name).read_bytes())
+            for part in descriptor.get('parts', []):
+                relative = part['path']
+                assert re.fullmatch(r'segments/[0-9a-f]{8}/[0-9a-f]{32}\.bin', relative)
+                target = unsigned_archive / 'data' / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open('xb') as stream:
+                    stream.write(unsigned_cat(unsigned_prefix + 'data/' + relative))
         verified = subprocess.run(['python3', ROOT / 'tools/check-crispawn-format.py', unsigned_archive, '--source-file', source],
                                   env=verify_env, capture_output=True, timeout=120)
         (unsigned / 'independent-verification.log').write_bytes(verified.stdout + verified.stderr)
@@ -342,6 +372,10 @@ def main():
             folder = recovered / 'logs' / directory
             folder.mkdir(parents=True)
             for name in restored_listing('/crispawn/logs/' + directory):
+                if name == 'io-observer':
+                    extract_io_trace(restored_listing, restored_cat,
+                        '/crispawn/logs/' + directory + '/' + name, folder / name)
+                    continue
                 assert re.fullmatch(r'(events-[0-9]+\.jsonl|log-info\.json|probe-final\.json)', name)
                 (folder / name).write_bytes(restored_cat('/crispawn/logs/' + directory + '/' + name))
             verify_log_directory(folder)

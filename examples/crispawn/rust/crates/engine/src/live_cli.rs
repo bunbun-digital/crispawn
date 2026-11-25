@@ -13,6 +13,10 @@ fn main() {
         }
     }
     let result = match args.as_slice() {
+        [mode, root, pid] if mode == "observe-io" => {
+            pid.parse::<u32>().map_err(|_| crispawn_engine::Error::new("ARGUMENT_ERROR", "invalid observer PID"))
+                .and_then(|pid| crispawn_engine::io_trace::observe(std::path::Path::new(root), pid))
+        }
         [mode] if mode == "persist-failure" => crispawn_engine::supervisor::persist_failure_child(),
         [mode, length, retries, delay] if mode == "inspect-ntfs" => {
             match (length.parse(), retries.parse(), delay.parse()) {

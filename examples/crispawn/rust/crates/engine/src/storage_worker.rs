@@ -38,6 +38,7 @@ impl Pool {
         })
     }
     pub fn submit(&self, mut task: Task, check: impl Fn() -> Result<()>) -> Result<()> {
+        let _trace = crate::io_trace::span(crate::io_trace::Op::QueueWait, 0);
         loop {
             check()?;
             match self.sender.as_ref().unwrap().try_send(task) {

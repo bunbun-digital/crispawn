@@ -14,6 +14,7 @@ pub mod diagnostics;
 mod failure_persistence;
 mod inline_verify;
 pub mod io;
+pub mod io_trace;
 pub mod job;
 pub mod job_config;
 pub mod journal;

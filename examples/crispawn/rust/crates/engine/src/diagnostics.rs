@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 const MAX_RECORD: usize = 32 * 1024;
+#[path = "diagnostic_mirror.rs"]
+mod destination_mirror;
 enum Message {
     Record(Vec<u8>),
     Export(PathBuf, mpsc::Sender<Result<()>>),
@@ -53,13 +55,15 @@ impl Diagnostics {
         let defer_persistent_sync = Arc::new(AtomicBool::new(false));
         let deferred = defer_persistent_sync.clone();
         let path = root.to_path_buf();
-        std::thread::spawn(move || {
-            crate::supervisor::observer_thread();
-            let outcome = write_loop(&path, capacity, receiver, &drop_count, &fail, &deferred);
-            if let Err(e) = outcome {
-                *fail.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
-            }
-        });
+        std::thread::Builder::new()
+            .name("cp-log-ram".into())
+            .spawn(move || {
+                crate::supervisor::observer_thread();
+                let outcome = write_loop(&path, capacity, receiver, &drop_count, &fail, &deferred);
+                if let Err(e) = outcome {
+                    *fail.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+                }
+            })?;
         Ok(Arc::new(Self {
             status: Mutex::new(Status::new(id)),
             start: Instant::now(),
@@ -104,9 +108,9 @@ impl Diagnostics {
                     emergency.pop_front();
                 }
             }
-            // Healthy synchronization retains all records. A stuck collector
-            // has a deadline and a separate recent in-memory failure tail.
-            if bytes.len() > MAX_RECORD || self.enqueue(Message::Record(bytes)).is_err() {
+            // Logging backpressure is not evidence that disk work has failed.
+            // The bounded emergency tail is updated even if the RAM queue is busy.
+            if bytes.len() > MAX_RECORD || self.enqueue_record(bytes).is_err() {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -120,6 +124,25 @@ impl Diagnostics {
             .copied()
             .collect()
     }
+    fn enqueue_record(&self, bytes: Vec<u8>) -> Result<()> {
+        let until = Instant::now() + Duration::from_millis(50);
+        let mut message = Message::Record(bytes);
+        loop {
+            match self.sender.try_send(message) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Full(value)) if Instant::now() < until => {
+                    message = value;
+                    std::thread::yield_now();
+                }
+                _ => {
+                    return Err(Error::new(
+                        "DIAGNOSTIC_RAM_BUSY",
+                        "bounded RAM log collector is busy",
+                    ))
+                }
+            }
+        }
+    }
     fn enqueue(&self, mut message: Message) -> Result<()> {
         let until = Instant::now() + Duration::from_secs(10);
         loop {
@@ -130,14 +153,10 @@ impl Diagnostics {
                 }
                 Err(mpsc::TrySendError::Full(value)) => {
                     if Instant::now() >= until {
-                        let error = Error::new(
-                            "DIAGNOSTIC_LOG_STALLED",
-                            "log queue did not drain within 10 seconds",
-                        );
-                        *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(error.to_string());
-                        crate::supervisor::failure(&error);
-                        return Err(error);
+                        return Err(Error::new(
+                            "DIAGNOSTIC_LOG_CONTROL_BUSY",
+                            "RAM log control queue did not drain within 10 seconds",
+                        ));
                     }
                     message = value;
                     std::thread::sleep(Duration::from_millis(10));
@@ -146,12 +165,33 @@ impl Diagnostics {
         }
     }
     fn acknowledgement(&self, rx: mpsc::Receiver<Result<()>>) -> Result<()> {
-        rx.recv_timeout(Duration::from_secs(30)).map_err(|_| {
-            Error::new(
-                "DIAGNOSTIC_LOG_STALLED",
-                "log operation acknowledgement deadline exceeded",
-            )
-        })??;
+        let started = Instant::now();
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(result) => {
+                    result?;
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::new(
+                        "DIAGNOSTIC_LOG_FAILED",
+                        "log operation ended without acknowledgement",
+                    ))
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.check()?;
+                    // Live/CLI supervision already watches actual completed
+                    // destination I/O. A fixed log timeout must not preempt it.
+                    if !crate::supervisor::managed() && started.elapsed() >= Duration::from_secs(30)
+                    {
+                        return Err(Error::new(
+                            "DIAGNOSTIC_LOG_STALLED",
+                            "unsupervised log operation deadline exceeded",
+                        ));
+                    }
+                }
+            }
+        }
         // A preceding queued record may have failed its mirror after the
         // caller's initial check, even though the subsequent RAM flush worked.
         self.check()
@@ -266,7 +306,7 @@ struct Persistent {
 impl Persistent {
     fn open(
         target: &Path,
-        files: &std::collections::VecDeque<PathBuf>,
+        files: &[(std::ffi::OsString, Vec<u8>)],
         interval_ms: u32,
         cap: u64,
         dropped: u64,
@@ -282,10 +322,9 @@ impl Persistent {
             deferred,
             filesystem: File::open(target)?,
         };
-        for path in files {
-            let src = io::open_regular(path, false)?;
-            let mut dst = io::create_new(&target.join(path.file_name().unwrap()))?;
-            io::copy_file(&src, &mut dst)?;
+        for (name, bytes) in files {
+            let mut dst = io::create_new(&target.join(name))?;
+            io::write_all(&mut dst, bytes)?;
             io::sync_file(&dst)?;
             log.current = Some(dst);
         }
@@ -312,6 +351,7 @@ impl Persistent {
         io::sync_dir(&self.root)
     }
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        let _trace = crate::io_trace::span(crate::io_trace::Op::LogWrite, bytes.len() as u64);
         let file = self
             .current
             .as_mut()
@@ -529,26 +569,49 @@ impl JobEvents for Diagnostics {
         );
     }
 }
-fn mirror(
-    persistent: &mut Option<Persistent>,
-    failure: &Mutex<Option<String>>,
-    action: impl FnOnce(&mut Persistent) -> Result<()>,
-) {
-    if let Some(log) = persistent.as_mut() {
-        if let Err(error) = action(log) {
-            *failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
-            crate::supervisor::failure(&error);
-            // Keep collecting to RAM after the NTFS mirror has failed.
-            persistent.take();
-        }
+fn ram_snapshot(
+    files: &std::collections::VecDeque<PathBuf>,
+) -> Result<Vec<(std::ffi::OsString, Vec<u8>)>> {
+    files
+        .iter()
+        .map(|path| {
+            let file = io::open_regular(path, false)?;
+            let length = file.metadata()?.len();
+            require(length <= 8 << 20, "LIMIT_EXCEEDED", "RAM log segment")?;
+            let mut bytes = vec![0; length as usize];
+            io::read_exact_at(&file, &mut bytes, 0, 65536)?;
+            Ok((path.file_name().unwrap().to_owned(), bytes))
+        })
+        .collect()
+}
+fn export_snapshot(
+    target: &Path,
+    files: Vec<(std::ffi::OsString, Vec<u8>)>,
+    cap: u64,
+    dropped: u64,
+) -> Result<()> {
+    fs::create_dir(target)?;
+    for (name, bytes) in files {
+        let mut dst = io::create_new(&target.join(name))?;
+        io::write_all(&mut dst, &bytes)?;
+        io::sync_file(&dst)?;
     }
+    io::atomic_write(
+        target,
+        "log-info.json",
+        &io::json(&json!({
+            "schema_version":1,"cap_bytes":cap.to_string(),"dropped_records":dropped
+        }))?,
+    )?;
+    io::sync_dir(target)?;
+    io::sync_dir(target.parent().unwrap())
 }
 fn write_loop(
     root: &Path,
     cap: u64,
     receiver: mpsc::Receiver<Message>,
-    dropped: &AtomicU64,
-    failure: &Mutex<Option<String>>,
+    dropped: &Arc<AtomicU64>,
+    failure: &Arc<Mutex<Option<String>>>,
     deferred: &Arc<AtomicBool>,
 ) -> Result<()> {
     let per_file = cap / 4;
@@ -556,14 +619,11 @@ fn write_loop(
     let mut used = 0u64;
     let mut files = std::collections::VecDeque::new();
     let mut current: Option<File> = None;
-    let mut persistent: Option<Persistent> = None;
+    let mut persistent: Option<destination_mirror::Mirror> = None;
     loop {
         let message = match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(message) => message,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                mirror(&mut persistent, failure, Persistent::sync_if_due);
-                continue;
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => Message::Stop,
         };
         match message {
@@ -577,95 +637,97 @@ fn write_loop(
                         io::sync_file(&f)?;
                     }
                     if files.len() == 4 {
-                        let old: PathBuf = files.pop_front().unwrap();
-                        fs::remove_file(old)?;
+                        fs::remove_file(files.pop_front().unwrap())?;
                     }
                     let path = root.join(format!("events-{sequence:06}.jsonl"));
                     sequence += 1;
                     current = Some(io::create_new(&path)?);
-                    mirror(&mut persistent, failure, |log| {
-                        log.rotate(path.file_name().unwrap())
-                    });
                     files.push_back(path);
                     used = 0;
                 }
                 io::write_all(current.as_mut().unwrap(), &bytes)?;
                 used += bytes.len() as u64;
-                mirror(&mut persistent, failure, |log| log.write(&bytes));
+                if let Some(mirror) = &persistent {
+                    mirror.record(files.back().unwrap().file_name().unwrap().to_owned(), bytes);
+                }
             }
             Message::Persist(target, interval_ms, ack) => {
+                if persistent
+                    .as_ref()
+                    .is_some_and(|mirror| mirror.open_failed())
+                {
+                    persistent.take();
+                }
                 let result = (|| {
                     require(
                         persistent.is_none(),
                         "PERSISTENT_LOG_ALREADY_OPEN",
                         "one NTFS log per session",
                     )?;
-                    if let Some(file) = &current {
-                        io::sync_file(file)?;
-                    }
-                    persistent = Some(Persistent::open(
-                        &target,
-                        &files,
+                    let initial = ram_snapshot(&files)?;
+                    persistent = Some(destination_mirror::Mirror::start(
+                        target,
+                        initial,
                         interval_ms,
                         cap,
-                        dropped.load(Ordering::Relaxed),
+                        dropped.clone(),
+                        failure.clone(),
                         deferred.clone(),
+                        ack.clone(),
                     )?);
                     Ok(())
                 })();
-                let _ = ack.send(result);
+                if let Err(error) = result {
+                    let _ = ack.send(Err(error));
+                }
             }
             Message::Flush(ack) => {
                 let result = (|| {
                     if let Some(file) = &current {
                         io::sync_file(file)?;
                     }
-                    if let Some(log) = &mut persistent {
-                        log.sync()?;
+                    if let Some(mirror) = &persistent {
+                        mirror.flush(ack.clone())?;
+                    } else {
+                        let _ = ack.send(Ok(()));
                     }
                     Ok(())
                 })();
-                let _ = ack.send(result);
+                if let Err(error) = result {
+                    let _ = ack.send(Err(error));
+                }
             }
             Message::ClosePersistent(status, ack) => {
-                let result = match persistent.take() {
-                    Some(log) => log.close(cap, dropped.load(Ordering::Relaxed), Some(&status)),
-                    None => Ok(()),
-                };
-                let _ = ack.send(result);
+                if let Some(mirror) = persistent.take() {
+                    if let Err(error) = mirror.close(status, ack.clone()) {
+                        let _ = ack.send(Err(error));
+                    }
+                } else {
+                    let _ = ack.send(Ok(()));
+                }
             }
             Message::Export(target, ack) => {
-                let result = (|| -> Result<()> {
-                    if let Some(f) = &current {
-                        io::sync_file(f)?;
-                    }
-                    fs::create_dir(&target)?;
-                    for path in &files {
-                        let src = io::open_regular(path, false)?;
-                        let mut dst = io::create_new(&target.join(path.file_name().unwrap()))?;
-                        io::copy_file(&src, &mut dst)?;
-                        io::sync_file(&dst)?;
-                    }
-                    io::atomic_write(
-                        &target,
-                        "log-info.json",
-                        &io::json(
-                            &json!({"schema_version":1,"cap_bytes":cap.to_string(),"dropped_records":dropped.load(Ordering::Relaxed)}),
-                        )?,
-                    )?;
-                    io::sync_dir(&target)?;
-                    io::sync_dir(target.parent().unwrap())?;
+                let result = (|| {
+                    let files = ram_snapshot(&files)?;
+                    let lost = dropped.load(Ordering::Relaxed);
+                    let reply = ack.clone();
+                    std::thread::Builder::new()
+                        .name("cp-log-export".into())
+                        .spawn(move || {
+                            crate::supervisor::observer_thread();
+                            let _ = reply.send(export_snapshot(&target, files, cap, lost));
+                        })?;
                     Ok(())
                 })();
-                let _ = ack.send(result);
+                if let Err(error) = result {
+                    let _ = ack.send(Err(error));
+                }
             }
             Message::Stop => {
                 if let Some(f) = current {
                     io::sync_file(&f)?;
                 }
-                if let Some(log) = persistent {
-                    log.close(cap, dropped.load(Ordering::Relaxed), None)?;
-                }
+                drop(persistent);
                 return Ok(());
             }
         }
@@ -676,6 +738,10 @@ pub fn tail(root: &Path, limit: usize) -> Result<String> {
     let mut files = fs::read_dir(root)?
         .map(|e| e.map(|e| e.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
+    files.retain(|path| {
+        path.file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("events-"))
+    });
     files.sort();
     let Some(path) = files.last() else {
         return Ok(String::new());

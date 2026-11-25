@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Independent v1/v2 reference check for development fixtures; no restore writes.
+"""Independent v1/v2/v3 reference check for development fixtures; no restore writes.
 
 Copyright (c) 2026 bunbun-liveos contributors. Licensed under Apache-2.0.
 Uses Python's struct/hashlib/zlib/lzma and the host libzstd, never Rust code.
@@ -12,6 +12,7 @@ import ctypes.util
 import hashlib
 import json
 import lzma
+import re
 from pathlib import Path
 import struct
 import zlib
@@ -126,6 +127,55 @@ def inspect(root, source):
     return {"reference_verified": True, "source_bytes": str(n), "ranges": len(records), "files": file_count}
 
 
+class SegmentedStream:
+    """Independent streaming reader for the existing segmented-file format."""
+    def __init__(self, root, name, backup_id, file_id, stored, descriptor_hash, blake3):
+        path = root / name
+        assert path.is_file() and not path.is_symlink() and path.stat().st_size <= 8 << 20
+        descriptor = path.read_bytes()
+        assert blake3(descriptor).hexdigest() == descriptor_hash
+        value = json.loads(descriptor)
+        assert set(value) == {'kind', 'schema_version', 'backup_id', 'file_id', 'bytes', 'parts'}
+        assert value['kind'] == 'crispawn.segmented_file' and value['schema_version'] == 1
+        assert value['backup_id'] == backup_id and value['file_id'] == file_id and value['bytes'] == stored
+        assert len(value['parts']) <= 32768
+        position, names = 0, set()
+        for part in value['parts']:
+            assert set(part) == {'path', 'stream_offset', 'bytes', 'used', 'blake3'}
+            assert re.fullmatch(r'segments/' + f'{file_id:08x}' + r'/[0-9a-fA-F]{32}\.bin', part['path'])
+            assert part['path'] not in names and part['stream_offset'] == position
+            assert 0 < part['used'] <= part['bytes'] <= 16 << 20
+            assert re.fullmatch(r'[0-9a-f]{64}', part['blake3'])
+            names.add(part['path']); position += part['used']
+        assert position == stored
+        self.root, self.parts, self.blake3 = root / 'data', value['parts'], blake3
+        self.index, self.payload, self.offset = 0, memoryview(b''), 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.payload = memoryview(b'')
+
+    def read(self, length):
+        assert 0 <= length <= 16 << 20
+        result = bytearray()
+        while len(result) < length:
+            if self.offset == len(self.payload):
+                if self.index == len(self.parts):
+                    break
+                part = self.parts[self.index]; self.index += 1
+                path = self.root / part['path']
+                assert all(not parent.is_symlink() for parent in [path, path.parent, path.parent.parent])
+                assert path.is_file() and path.stat().st_size == part['bytes']
+                data = path.read_bytes()
+                assert self.blake3(data).hexdigest() == part['blake3']
+                self.payload, self.offset = memoryview(data)[:part['used']], 0
+            count = min(length - len(result), len(self.payload) - self.offset)
+            result.extend(self.payload[self.offset:self.offset + count]); self.offset += count
+        return bytes(result)
+
+
 def inspect_v2(root, source, commit, meta, plan):
     # Optional host-side dependency only. The Linux image uses Rust BLAKE3.
     try:
@@ -135,7 +185,9 @@ def inspect_v2(root, source, commit, meta, plan):
     version = meta["format_version"]
     assert version in (2, 3) and commit["format_version"] == plan["format_version"] == version
     assert meta["hash_algorithm"] == "blake3" and commit["backup_id"] == meta["backup_id"]
-    assert commit["verification_kind"] == "buffered_reopen"
+    segmented = plan.get('segmented_storage', False)
+    assert type(segmented) is bool
+    assert commit['verification_kind'] in ({'compressed_blake3', 'skipped'} if segmented else {'buffered_reopen'})
     assert set(commit["hashes"]) == {"metadata.json", "plan.json", "files.csv", "checksums.sha256"}
     for name, digest in commit["hashes"].items():
         with (root / name).open("rb") as f:
@@ -151,6 +203,8 @@ def inspect_v2(root, source, commit, meta, plan):
 
     if version == 3:
         columns.append("compression_profiles")
+    if segmented:
+        columns.append("storage_descriptor_blake3")
     vocabulary = {"raw:0", "zero:0", "zstd:1", "zstd:3", "zstd:6", "zstd:9", "xz:0", "xz:3", "gzip:1", "gzip:6", "gzip:9"}
 
     def checked(data, magic, length):
@@ -169,8 +223,10 @@ def inspect_v2(root, source, commit, meta, plan):
             assert 208 <= stored <= limit and count == (length + chunk - 1) // chunk
             assert len(row["raw_blake3"]) == 64 and row["raw_blake3"] == bytes.fromhex(row["raw_blake3"]).hex()
             ids.add(file_id); names.add(Path(name).name)
-            with (root / name).open("rb") as data:
-                assert (root / name).stat().st_size == stored
+            stream = SegmentedStream(root, name, meta['backup_id'], file_id, stored, row['storage_descriptor_blake3'], blake3) if segmented else (root / name).open('rb')
+            with stream as data:
+                if not segmented:
+                    assert (root / name).stat().st_size == stored
                 header = data.read(64); checked(header, b"PBKFILE" + str(version).encode(), 64)
                 assert struct.unpack_from("<II16sQQ", header, 8) == (version, 64, ident, file_id, offset)
                 assert header[48:60] == bytes(12)
@@ -204,7 +260,7 @@ def inspect_v2(root, source, commit, meta, plan):
                 if version == 3:
                     assert row["compression_profiles"] == ";".join(sorted(profiles))
             covered += length; file_count += 1; ranges += frames
-    assert covered == total and {p.name for p in (root / "data").iterdir()} == names
+    assert covered == total and {p.name for p in (root / "data").iterdir()} == names | ({'segments'} if segmented else set())
     assert ranges == (total + chunk - 1) // chunk
     return {"reference_verified": True, "format_version": version, "hash_algorithm": "blake3", "source_bytes": str(total), "ranges": ranges, "files": file_count}
 

@@ -29,6 +29,9 @@ thread_local! {
 pub fn observer_thread() {
     OBSERVER_THREAD.with(|observer| observer.set(true));
 }
+pub(crate) fn managed() -> bool {
+    SOCKET.get().is_some_and(|socket| socket.is_some())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

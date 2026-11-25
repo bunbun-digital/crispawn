@@ -279,11 +279,13 @@ fn produce(
                                 hooks.at("source_read")?;
                                 let mut raw = vec![0; length as usize];
                                 let start = std::time::Instant::now();
+                                let source_read_trace = crate::io_trace::span(crate::io_trace::Op::SourceRead, length);
                                 io::read_exact_at(source, &mut raw, offset, read_bytes).map_err(|mut error| {
                                     error.detail = format!("source read: offset={offset} length={length} request_bytes={read_bytes}: {}", error.detail);
                                     error
                                 })?;
                                 let read_seconds = start.elapsed().as_secs_f64();
+                                drop(source_read_trace);
                                 io::release_source_cache(source, offset, length);
                                 let read=queue.read.fetch_add(length,Ordering::Relaxed)+length;
                                 if let Some(s)=&queue.storage {s.source_read.store(read,Ordering::Relaxed);}

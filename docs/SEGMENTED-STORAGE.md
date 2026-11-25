@@ -51,26 +51,27 @@ referenced parts are required together.
 
 ## Calibration and size limits
 
-The first physical part is at most 1 MiB, subject to the available-memory cap
-and an earlier logical-stream end. Measure its cached service time, including
-queue wait, write acceptance, BLAKE3 readback and descriptor publication.
-Separate write/check timings, sample bytes and elapsed time are recorded.
+The first physical part is at most 1 MiB. A very fast cached admission does
+not increase this baseline: copying into RAM is not USB media throughput.
+There is no separate disposable write trial.
 
-For measured sample bytes `B` and service seconds `T`, select:
+While copying, completed partition-sector counters provide a rolling write-rate
+estimate. Divide this rate between the two writers and apply the soft sizing rule:
 
 ```text
-baseline = align_down(clamp(B / max(T, 0.001) * 4 seconds,
+baseline = align_down(clamp(per_writer_bytes_per_second * 4 seconds,
                             64 KiB, memory-dependent cap), 4 KiB)
 ```
 
-Four seconds provides margin toward the user's **soft five-second target**.
-This is cache-admission/checking latency, not measured physical-media bandwidth.
-Other initial parts can already be queued at the initial size while the first
-sample completes; calibration does not serialize the whole writer pipeline.
-The cap is at most 16 MiB per part and is lower on memory-limited plans. Keep
-this first-file baseline for the copy; do not waste another trial copy. A
-pending buffer is also flushed when its age reaches five seconds and the
-writer next reaches a safe boundary. Logical tails can be smaller.
+Without usable device counters, substantial part-service samples of at least
+256 KiB and 50 ms provide a fallback. Rates are smoothed, growth is limited to
+2x per update, and slow samples can reduce the target. The first calibration
+bytes/time remain visible separately from the changing baseline. The ceiling
+is at most 16 MiB and can be lower on memory-limited plans. This is a scheduling
+estimate, not a measurement of physical durability or an absolute five-second
+completion guarantee. Already queued files retain their actual sizes.
+A pending buffer is also flushed at the next safe boundary after five seconds;
+logical tails can be smaller.
 
 Device firmware, kernel writeback, retries, metadata operations and changing
 media performance can exceed five seconds. This is not a real-time guarantee
@@ -84,18 +85,27 @@ For each physical part:
 1. Compute BLAKE3 from the encoded bytes in RAM, before writing.
 2. Create a unique file and write its bytes through the ordinary OS page cache.
 3. Read its complete bytes back, recompute BLAKE3 and compare the expected hash.
-4. Publish the descriptor mapping in source-stream order before acknowledging it.
+4. Retain the checked mapping in source-stream order. Batch its descriptor publication.
 
 Two writer/checker threads consume a bounded queue of four parts. A slow first
 part does not prevent the second writer from working. Each stream's outstanding
 receipts are also bounded; out-of-order completions cannot create a hole in its
-published descriptor. The queue is fed without waiting for each individual part
+in-memory mapping. The queue is fed without waiting for each individual part
 to finish, subject to available encoded data, memory, pause/cancel and error checks.
 
 During productive copying there is no per-part, per-descriptor or per-journal
 `fsync`. Persistent logs continue appending; their per-record/periodic durability
 sync is suspended during copying and forced on final/error close. This avoids
 another device flush from each progress record or log rotation.
+
+Descriptor JSON is replaced after eight accepted parts or two seconds at a
+safe receipt boundary, and always by an explicit stream sync/checkpoint/seal.
+This reduces NTFS file creation, replacement and directory-index updates. There
+is no new on-disk format. In-process checked/source credit can use the validated
+in-memory mapping; it does not promise intermediate power-loss recovery. Every
+mapping is published before a checkpoint/seal and the final COMMITTED barrier.
+Directory creation is attempted only when a parent is actually absent; existing
+parents are still checked for non-directory/symlink substitution.
 
 After all writers, checks, descriptors, indexes and journal updates are finished,
 perform one `syncfs` barrier before creating COMMITTED. Its filesystem descriptor
@@ -149,7 +159,7 @@ frame, so changing compression ratios and rounding do not distort or lose progre
 For example, 100 MB compressed to 10 MB earns 10 MB of source-equivalent progress
 when 1 MB is stored and checked. File headers/footers do not earn progress; a
 zero frame earns its source range when its payload-free frame header is checked.
-Credit is published after readback and descriptor publication, never merely
+Credit is published after readback and ordered in-memory mapping, never merely
 because data is queued or written. Resume credits already checked prefixes once.
 This is a progress conversion, not a claim that partial compressed data has been
 decompressed and checked against the original. Actual compressed byte counts

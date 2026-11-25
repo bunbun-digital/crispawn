@@ -24,6 +24,17 @@ def example(name='builder-usb.json'):
 
 
 class ConfigContract(unittest.TestCase):
+    def test_optional_io_observer_is_typed_and_capability_gated(self):
+        value = example()['runtime']
+        for enabled in [True, False]:
+            value['diagnostics']['io_observer'] = enabled
+            contract.validate(value)
+            self.assertIn('diagnostics.io_observer', contract.required_capabilities(value))
+            with self.assertRaisesRegex(contract.ContractError, 'NOT_REPRESENTABLE_IN_V1'):
+                contract.legacy_v1(value)
+        for invalid in [None, 0, 'true']:
+            value['diagnostics']['io_observer'] = invalid
+            self.reject(value)
     def test_copy_write_verification_is_optional_typed_and_capability_gated(self):
         value = example()['runtime']
         self.assertNotIn('verify_after_write', value['processing'])

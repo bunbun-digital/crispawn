@@ -73,11 +73,13 @@ def validate_config(data):
     if not isinstance(value, dict) or type(value.get("schema_version", 1)) is not int or value.get("schema_version", 1) != 1:
         raise ValueError("expected configuration schema 1")
     allowed = {"schema_version", "operation", "source_id", "source_ids", "language", "backup_directory", "restore", "tuning", "gui",
-               "menu_seconds", "completion_seconds", "poweroff_on_success", "poweroff_on_failure", "log_policy", "log_sync_interval_ms", "probe_interval_ms"}
+               "menu_seconds", "completion_seconds", "poweroff_on_success", "poweroff_on_failure", "log_policy", "log_sync_interval_ms", "probe_interval_ms", "io_observer"}
     if value.keys() - allowed:
         raise ValueError("unknown configuration field")
     if type(value.get('poweroff_on_failure', True)) is not bool:
         raise ValueError('poweroff_on_failure must be boolean')
+    if type(value.get('io_observer', True)) is not bool:
+        raise ValueError('io_observer must be boolean')
     if value.get("language", "ja") not in ("ja", "en"):
         raise ValueError("invalid language")
     ids = value.get("source_ids", [])

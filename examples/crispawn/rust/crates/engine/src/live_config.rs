@@ -96,6 +96,7 @@ impl Settings {
             "logging.never",
             "processing.auto",
             "processing.verify_after_write",
+            "diagnostics.io_observer",
             "processing.profile.balanced",
             "processing.profile.long_matches",
             "processing.profile.high_compression",
@@ -210,6 +211,11 @@ struct IoPolicy {
 #[serde(deny_unknown_fields)]
 struct Diagnostics {
     probe_interval_ms: u32,
+    #[serde(default = "observer_default")]
+    io_observer: bool,
+}
+fn observer_default() -> bool {
+    true
 }
 
 fn invalid(path: &'static str) -> Error {
@@ -337,6 +343,7 @@ impl Runtime {
             log_policy: self.logging.policy,
             log_sync_interval_ms: self.logging.sync_interval_ms,
             probe_interval_ms: self.diagnostics.probe_interval_ms,
+            io_observer: self.diagnostics.io_observer,
             ..Config::default()
         };
         config.tuning.mode = crate::job_config::TuningMode::Auto;

@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 
 from crispawn_qemu import run_guest
-from crispawn_log_evidence import verify_log_directory
+from crispawn_log_evidence import verify_log_directory, extract_io_trace, extract_segmented_parts
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -115,6 +115,7 @@ def main():
                     filename = row['relative_path']
                     assert re.fullmatch(r'data/data-[0-9]{6}\.pbk', filename)
                     (archive/filename).write_bytes(cat(prefix+filename))
+            extract_segmented_parts(archive, cat, prefix)
             result = subprocess.run(['python3', ROOT/'tools/check-crispawn-format.py', archive, '--source-file', source],
                                     env=dict(os.environ, PYTHONPATH=str(ROOT/'build/verifier-libs')),
                                     capture_output=True, timeout=120)
@@ -131,6 +132,10 @@ def main():
                 target = folder/'logs'/group
                 target.mkdir(parents=True)
                 for filename in listing('/crispawn/logs/'+group):
+                    if filename == 'io-observer':
+                        extract_io_trace(listing, cat, '/crispawn/logs/'+group+'/'+filename, target/filename,
+                                         require_copy=True, source_bytes=source.stat().st_size)
+                        continue
                     assert re.fullmatch(r'events-[0-9]+\.jsonl|log-info\.json|probe-final\.json', filename)
                     data = cat('/crispawn/logs/'+group+'/'+filename)
                     (target/filename).write_bytes(data)

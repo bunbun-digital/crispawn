@@ -85,3 +85,7 @@ ordinary temporary files, separately from VM and physical-device acceptance.
 The current automatic-copy storage layout and its soft five-second sizing policy
 are specified in [Segmented compressed storage](docs/SEGMENTED-STORAGE.md).
 
+The temporary independent I/O observer is enabled by default for this diagnostic
+build and can be disabled with `diagnostics.io_observer: false`. Regression
+acceptance validates distinct observer/worker PIDs, measured operation categories,
+NTFS trace export and the observer's final marker. See [I/O diagnostics](docs/IO-PIPELINE.md#independent-diagnostic-collection-and-temporary-io-observer).

@@ -115,6 +115,7 @@ pub struct Config {
     pub log_policy: LogPolicy,
     pub log_sync_interval_ms: u32,
     pub probe_interval_ms: u32,
+    pub io_observer: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -135,6 +136,7 @@ impl Default for Config {
             log_policy: LogPolicy::Always,
             log_sync_interval_ms: 0,
             probe_interval_ms: 250,
+            io_observer: true,
         }
     }
 }
@@ -945,6 +947,12 @@ fn export(diag: &Diagnostics, mount: &Mounted, kind: &str) -> Result<PathBuf> {
             .collect::<String>()
     ));
     diag.export(&target)?;
+    if let Err(error) = crate::io_trace::export(&target) {
+        diag.record(
+            "io_observer_export_failed",
+            json!({"error":error.to_string()}),
+        );
+    }
     io::atomic_write(&target, "probe-final.json", &io::json(&diag.snapshot())?)?;
     mount.sync()?;
     Ok(target)
@@ -1049,6 +1057,13 @@ pub fn run() -> Result<()> {
                         "PB_PROBE {}",
                         serde_json::to_string(&status.probe_projection()).unwrap()
                     ));
+                }
+                if count % 20 == 0 {
+                    if let Ok(sample) =
+                        io::read_json::<serde_json::Value>(&root.join("io-observer/latest.json"))
+                    {
+                        diag.record("io_observer", sample);
+                    }
                 }
                 count += 1;
                 std::thread::sleep(Duration::from_millis(
@@ -1291,6 +1306,18 @@ fn run_inner(
     let mut config = load_config(boot_root, Path::new(BUILTIN_CONFIG))?;
     // Apply retry/timeout and language before probing the configured destination.
     crate::supervisor::configure(&config.tuning.io_policy);
+    if config.io_observer {
+        match crate::io_trace::start(root) {
+            Ok(()) => diag.record(
+                "io_observer_started",
+                json!({"independent_process":true,"ram_cap_bytes":8 << 20}),
+            ),
+            Err(error) => diag.record(
+                "io_observer_unavailable",
+                json!({"error":error.to_string()}),
+            ),
+        }
+    }
     crate::supervisor::live_failure_policy(
         config.poweroff_on_failure,
         config.completion_seconds,
@@ -1449,6 +1476,7 @@ fn run_inner(
             json!({"enabled":true,"sync_interval_ms":config.log_sync_interval_ms}),
         );
     }
+    crate::io_trace::destination(&mount.device.number);
     diag.probe_interval_ms
         .store(u64::from(config.probe_interval_ms), Ordering::Relaxed);
     diag.status
@@ -1507,15 +1535,26 @@ fn run_inner(
         ));
         diag.phase("SAVING_LOGS", "persisting bounded RAM diagnostics on NTFS");
         diag.record("finalization",json!({"engine_verified":true,"normal_poweroff_planned":config.poweroff_on_success,"unmount_requested":true}));
-        if config.log_policy == LogPolicy::Always {
-            export(diag, &mount, "complete")?;
-        }
+        let complete_log = if config.log_policy == LogPolicy::Always {
+            Some(export(diag, &mount, "complete")?)
+        } else {
+            None
+        };
         mount.sync()?;
         diag.phase(
             "UNMOUNTING_NTFS",
             "all backup, report and requested log writes are synced",
         );
         diag.close_persistent()?;
+        crate::io_trace::stop();
+        if let Some(target) = complete_log {
+            if let Err(error) = crate::io_trace::export_final(&target) {
+                diag.record(
+                    "io_observer_final_export_failed",
+                    json!({"error":error.to_string()}),
+                );
+            }
+        }
         mount.unmount()?;
         if let Some(boot) = &boot_mount {
             boot.unmount()?;

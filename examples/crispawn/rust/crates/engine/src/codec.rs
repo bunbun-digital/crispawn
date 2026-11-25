@@ -10,6 +10,7 @@ pub struct Encoded {
     pub payload: Vec<u8>,
 }
 pub fn encode(raw: Vec<u8>, codec: Codec, level: i32) -> Result<Encoded> {
+    let _trace = crate::io_trace::span(crate::io_trace::Op::Encode, raw.len() as u64);
     if raw.iter().all(|v| *v == 0) {
         return Ok(Encoded {
             codec: Codec::Zero,
