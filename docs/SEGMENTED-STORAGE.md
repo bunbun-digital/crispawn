@@ -179,6 +179,14 @@ Staging, six queued/active part buffers, active-part receipts, encoder workspace
 are reserved together. Each descriptor is at most 8 MiB and contains at most
 32,768 parts. Physical files remain below the product's 2,000,000,000-byte ceiling.
 
+The descriptor reader uses this same 8 MiB limit during copy sealing, explicit
+verification, recovery and restoration. Generic JSON metadata retains its 64 KiB
+limit. Earlier readers incorrectly applied that generic limit to descriptors,
+so a legitimate descriptor larger than 64 KiB could stop copying with
+`LIMIT_EXCEEDED: metadata file too large`. Rejections now include the path,
+observed length and applicable limit. This is a reader correction; the stored
+format, descriptor BLAKE3 and part-count/size limits are unchanged.
+
 Native ordinary-file tests cover split frames, exact restore, encoded-byte
 corruption, explicit interrupted recovery, retained part files, bounded calibration,
 pending-block arithmetic and two active held writers plus a queued part. An

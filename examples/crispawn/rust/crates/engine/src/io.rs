@@ -308,10 +308,14 @@ pub fn create_new(path: &Path) -> Result<File> {
 }
 pub fn read_small(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let f = open_regular(path, false)?;
+    let observed = f.metadata()?.len();
     require(
-        f.metadata()?.len() <= limit,
+        observed <= limit,
         "LIMIT_EXCEEDED",
-        "metadata file too large",
+        format!(
+            "metadata file too large: path={} bytes={observed} limit={limit}",
+            path.display()
+        ),
     )?;
     let length = f.metadata()?.len();
     require(
@@ -391,7 +395,15 @@ pub fn json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(b)
 }
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&read_small(path, 65536)?)
+    read_json_bounded(path, 65536)
+}
+/// Larger metadata formats must opt in to their own existing, validated limit.
+/// Keep the generic metadata reader's 64 KiB budget unchanged.
+pub(crate) fn read_json_bounded<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    limit: u64,
+) -> Result<T> {
+    serde_json::from_slice(&read_small(path, limit)?)
         .map_err(|e| Error::new("INVALID_JSON", e.to_string()))
 }
 pub fn same_file(a: &File, b: &File) -> Result<bool> {
@@ -596,6 +608,19 @@ pub fn canonical_archive(path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[test]
+    fn generic_json_limit_stays_64_kib_and_reports_the_rejected_path_and_size() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("metadata.json");
+        let mut bytes = b"{}".to_vec();
+        bytes.resize(65537, b' ');
+        fs::write(&path, bytes).unwrap();
+        let error = read_json::<serde_json::Value>(&path).unwrap_err();
+        assert_eq!(error.code, "LIMIT_EXCEEDED");
+        assert!(error.detail.contains(path.to_str().unwrap()));
+        assert!(error.detail.contains("bytes=65537"));
+        assert!(error.detail.contains("limit=65536"));
+    }
     #[test]
     fn archive_guard_releases_its_lease_even_if_a_fork_inherited_the_descriptor() {
         let root = tempfile::tempdir().unwrap();

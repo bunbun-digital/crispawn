@@ -680,12 +680,16 @@ impl DataFile {
     pub fn read(path: &Path, segmented: bool) -> Result<Self> {
         let file = io::open_regular(path, false)?;
         let manifest = if segmented {
+            let bytes = file.metadata()?.len();
             require(
-                file.metadata()?.len() <= MAX_DESCRIPTOR,
+                bytes <= MAX_DESCRIPTOR,
                 "LIMIT_EXCEEDED",
-                "storage descriptor too large",
+                format!(
+                    "storage descriptor too large: path={} bytes={bytes} limit={MAX_DESCRIPTOR}",
+                    path.display()
+                ),
             )?;
-            let m: Manifest = io::read_json(path)?;
+            let m: Manifest = io::read_json_bounded(path, MAX_DESCRIPTOR)?;
             m.validate()?;
             Some(m)
         } else {
@@ -1296,6 +1300,158 @@ mod tests {
         )
         .unwrap();
         (t, s, f)
+    }
+    #[test]
+    fn large_descriptors_finish_verify_and_restore_after_real_small_part_writes() {
+        use crate::{archive::CsvRows, backup, control::RunControl, restore, v2, verify};
+        use crispawn_core::types::{Codec, Metadata, NoEvents};
+        let mut state = 0x6a09e667f3bcc908u64;
+        let original: Vec<_> = (0..24 << 20)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        for checked in [true, false] {
+            let t = tempfile::tempdir().unwrap();
+            let source = t.path().join("source");
+            fs::write(&source, &original).unwrap();
+            let archive = t.path().join("archive");
+            let plan = Plan {
+                format_version: 3,
+                segmented_storage: true,
+                regions: 1,
+                workers: 2,
+                range_bytes: 1 << 20,
+                read_bytes: 64 << 10,
+                container_bytes: 64 << 20,
+                codec: Codec::Zstd,
+                compression_level: 3,
+                memory_limit_bytes: 1 << 30,
+                ..Plan::default()
+            };
+            let control = RunControl::new();
+            control.set_backup_verification(checked);
+            assert!(
+                backup::backup(
+                    &source,
+                    &archive,
+                    plan.clone(),
+                    t.path(),
+                    &NoEvents,
+                    &NoHooks,
+                    &control
+                )
+                .unwrap()
+                .dataset_committed
+            );
+            let meta: Metadata = io::read_json(&archive.join("metadata.json")).unwrap();
+            let mut index =
+                CsvRows::<v2::FileEntry>::open(&archive.join("files.csv"), &v2::SEGMENTED_COLUMNS)
+                    .unwrap();
+            let mut entry = index.next_row().unwrap().unwrap();
+            assert!(index.next_row().unwrap().is_none());
+            drop(index);
+            let path = archive.join(&entry.relative_path);
+            let old = DataFile::read(&path, true).unwrap();
+            let mut encoded = vec![0; old.metadata().unwrap().len() as usize];
+            io::read_exact_at(&old, &mut encoded, 0, 65536).unwrap();
+            drop(old);
+            fs::rename(&path, t.path().join("original-descriptor")).unwrap();
+            fs::remove_file(archive.join("COMMITTED")).unwrap();
+            // Keep the real encoded stream. Exercise the production writer and
+            // seal receipt with its legitimate 64 KiB lower bound, without
+            // spending minutes emulating a slow device or adding a runtime knob.
+            let mut shared = Shared::new(&meta.backup_id, 2).unwrap();
+            Arc::get_mut(&mut shared).unwrap().capacity = MIN;
+            shared.state.lock().unwrap().baseline = MIN;
+            shared.verify_after_write.store(checked, Ordering::Relaxed);
+            let mut stored =
+                DataFile::create(&path, &plan, &meta.backup_id, entry.file_id, shared.clone())
+                    .unwrap();
+            stored.write_all(&encoded).unwrap();
+            stored.sync().unwrap();
+            let hash = stored.descriptor_blake3().unwrap().unwrap();
+            drop(stored);
+            let bytes = fs::metadata(&path).unwrap().len();
+            assert!(bytes > 65536 && bytes <= MAX_DESCRIPTOR);
+            eprintln!("copy_readback={checked} descriptor_bytes={bytes}");
+            shared.finish_file(&path, entry.file_id, &hash).unwrap();
+            entry.storage_descriptor_blake3 = Some(hash);
+            v2::write_indices(&archive, &[entry]).unwrap();
+            v2::write_commit_with_verification(&archive, &meta.backup_id, checked).unwrap();
+            verify::verify(&archive, t.path(), &NoEvents).unwrap();
+            let target = t.path().join("target");
+            assert!(
+                restore::restore(&archive, &target, false, t.path(), &NoEvents, &NoHooks)
+                    .unwrap()
+                    .restored_ranges_verified
+            );
+            assert_eq!(fs::read(target).unwrap(), original);
+            // A larger parsing budget must never bypass descriptor integrity.
+            use std::io::Write;
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b" ")
+                .unwrap();
+            assert_eq!(
+                verify::verify(&archive, t.path(), &NoEvents)
+                    .unwrap_err()
+                    .code,
+                "STORED_HASH_MISMATCH"
+            );
+            let blocked = t.path().join("must-not-create");
+            assert!(
+                restore::restore(&archive, &blocked, false, t.path(), &NoEvents, &NoHooks).is_err()
+            );
+            assert!(!blocked.exists());
+        }
+    }
+    #[test]
+    fn descriptor_reader_uses_the_existing_eight_mib_format_limit() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("descriptor.pbk");
+        let manifest = Manifest {
+            kind: "crispawn.segmented_file".into(),
+            schema_version: 1,
+            backup_id: "1".repeat(32),
+            file_id: 0,
+            bytes: 512,
+            parts: (0..512)
+                .map(|n| Part {
+                    path: format!("segments/00000000/{n:032x}.bin"),
+                    stream_offset: n,
+                    bytes: 1,
+                    used: 1,
+                    blake3: "2".repeat(64),
+                })
+                .collect(),
+        };
+        let mut bytes = io::json(&manifest).unwrap();
+        assert!(bytes.len() > 65536);
+        fs::write(&path, &bytes).unwrap();
+        let read = DataFile::read(&path, true).unwrap();
+        assert_eq!(read.manifest.unwrap().parts.len(), 512);
+        bytes.resize(MAX_DESCRIPTOR as usize, b' ');
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            DataFile::read(&path, true)
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .len(),
+            512
+        );
+        let file = io::open_regular(&path, true).unwrap();
+        file.set_len(MAX_DESCRIPTOR + 1).unwrap();
+        assert_eq!(
+            DataFile::read(&path, true).err().unwrap().code,
+            "LIMIT_EXCEEDED"
+        );
     }
     #[test]
     fn arbitrary_encoded_bytes_split_without_decoding_and_read_as_one_stream() {
