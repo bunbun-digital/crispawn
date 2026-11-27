@@ -3,6 +3,10 @@
 //! Physical part files are independent of the PBK compression-frame boundaries.
 //! Parts are written/checked concurrently through the OS cache. Durability is
 //! established by the final filesystem barrier before COMMITTED, not per part.
+//!
+//! Descriptor schema 2 appends bounded chunks to one large physical part per
+//! stream (up to `PART_LIMIT`) instead of creating one file per chunk. Chunk
+//! size remains the write/check/progress unit; part size is the file unit.
 use crate::{io, parallel_hash::CpuPool, Error, Hooks, NoHooks, Result};
 use crispawn_core::{
     error::require,
@@ -25,10 +29,18 @@ use std::{
 
 const FIRST: u64 = 1 << 20;
 const MIN: u64 = 64 << 10;
+/// Largest appended chunk (write/check unit) and schema-1 part size.
 const MAX: u64 = 16 << 20;
+/// Largest schema-2 physical part file. Below MAX_BACKUP_FILE_BYTES.
+pub(crate) const PART_LIMIT: u64 = 1 << 30;
 const MAX_PARTS: usize = 32768;
 const MAX_DESCRIPTOR: u64 = 8 << 20;
 const GOAL: f64 = 5.0;
+/// Buffers below MIN (typically zero-frame headers) wait longer before a
+/// time-based flush, so zero-filled regions do not produce tiny appends.
+const SMALL_GOAL: f64 = 30.0;
+const SCHEMA: u32 = 2;
+const MAX_DIAGNOSTICS: usize = 8192;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,10 +64,15 @@ struct Manifest {
 impl Manifest {
     fn validate(&self) -> Result<()> {
         require(
-            self.kind == "crispawn.segmented_file" && self.schema_version == 1,
+            self.kind == "crispawn.segmented_file" && matches!(self.schema_version, 1 | 2),
             "UNKNOWN_VERSION",
             "segmented file descriptor",
         )?;
+        let part_limit = if self.schema_version == 1 {
+            MAX
+        } else {
+            PART_LIMIT
+        };
         types::unhex::<16>(&self.backup_id)?;
         require(
             self.file_id < crispawn_core::plan::MAX_FILES && self.parts.len() <= MAX_PARTS,
@@ -77,7 +94,7 @@ impl Manifest {
                     && names.insert(&p.path)
                     && p.stream_offset == length
                     && p.bytes > 0
-                    && p.bytes <= MAX
+                    && p.bytes <= part_limit
                     && p.used > 0
                     && p.used <= p.bytes,
                 "INVALID_STORAGE_PART",
@@ -106,6 +123,30 @@ struct State {
     files: BTreeMap<u64, (SourceIdentity, String)>,
     active: BTreeMap<u64, (String, u64)>,
     failure: Option<Error>,
+    /// Bounded per-chunk/per-part records drained by `monitor` into the log.
+    diagnostics: VecDeque<(&'static str, serde_json::Value)>,
+    dropped_diagnostics: u64,
+    summary: Summary,
+}
+fn push_diagnostic(s: &mut State, name: &'static str, value: serde_json::Value) {
+    if s.diagnostics.len() >= MAX_DIAGNOSTICS {
+        s.dropped_diagnostics += 1;
+    } else {
+        s.diagnostics.push_back((name, value));
+    }
+}
+/// Whole-copy storage totals, emitted once as `storage_summary`.
+#[derive(Default, Serialize)]
+struct Summary {
+    chunks: u64,
+    chunk_bytes: u64,
+    parts_sealed: u64,
+    part_bytes: u64,
+    /// Sealed part counts by size class: <=1KiB, <=1MiB, <=64MiB, <=256MiB, larger.
+    part_size_classes: [u64; 5],
+    max_chunk_write_ms: u64,
+    max_chunk_queue_ms: u64,
+    max_part_extents: u32,
 }
 pub(crate) struct Shared {
     pub pool: Arc<CpuPool>,
@@ -117,6 +158,8 @@ pub(crate) struct Shared {
     done: AtomicBool,
     hooks: Arc<dyn Hooks>,
     capacity: u64,
+    /// Physical part ceiling; PART_LIMIT in production, smaller in tests.
+    part_limit: u64,
     started: Instant,
     writers: OnceLock<crate::storage_worker::Pool>,
     next_job: AtomicU64,
@@ -140,6 +183,7 @@ impl Shared {
             done: AtomicBool::new(false),
             hooks: Arc::new(NoHooks),
             capacity: MAX,
+            part_limit: PART_LIMIT,
             started: Instant::now(),
             writers: OnceLock::new(),
             next_job: AtomicU64::new(0),
@@ -181,6 +225,9 @@ impl Shared {
                 files: BTreeMap::new(),
                 active: BTreeMap::new(),
                 failure: None,
+                diagnostics: VecDeque::new(),
+                dropped_diagnostics: 0,
+                summary: Summary::default(),
             })),
         }))
     }
@@ -219,11 +266,68 @@ impl Shared {
         s.status.current_file_bytes = size;
         s.phase_since = Instant::now();
     }
-    fn submit(&self, task: crate::storage_worker::Task) -> Result<()> {
+    fn submit(&self, key: u64, task: crate::storage_worker::Task) -> Result<()> {
         if self.writers.get().is_none() {
             let _ = self.writers.set(crate::storage_worker::Pool::new()?);
         }
-        self.writers.get().unwrap().submit(task, || self.check())
+        self.writers
+            .get()
+            .unwrap()
+            .submit(key, task, || self.check())
+    }
+    fn part_sealed(
+        &self,
+        relative: &str,
+        bytes: u64,
+        chunks: u32,
+        seconds: f64,
+        extents: Option<u32>,
+    ) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let class = match bytes {
+            0..=1024 => 0,
+            1025..=1048576 => 1,
+            1048577..=67108864 => 2,
+            67108865..=268435456 => 3,
+            _ => 4,
+        };
+        s.summary.parts_sealed += 1;
+        s.summary.part_bytes += bytes;
+        s.summary.part_size_classes[class] += 1;
+        s.summary.max_part_extents = s.summary.max_part_extents.max(extents.unwrap_or(0));
+        push_diagnostic(
+            &mut s,
+            "storage_part",
+            serde_json::json!({"part":relative,"bytes":bytes,"chunks":chunks,
+                "open_seconds":(seconds*1000.0).round()/1000.0,"extents":extents}),
+        );
+    }
+    /// Emit and clear collected storage diagnostics.
+    pub fn drain_diagnostics(&self, events: &dyn EventSink) {
+        let (records, dropped) = {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                std::mem::take(&mut s.diagnostics),
+                std::mem::take(&mut s.dropped_diagnostics),
+            )
+        };
+        if dropped > 0 {
+            events.diagnostic(
+                "storage_diagnostics_dropped",
+                &serde_json::json!({"records":dropped}),
+            );
+        }
+        for (name, value) in records {
+            events.diagnostic(name, &value);
+        }
+    }
+    pub fn emit_summary(&self, events: &dyn EventSink) {
+        self.drain_diagnostics(events);
+        let value = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            serde_json::to_value(&s.summary).unwrap_or_default()
+        };
+        events.diagnostic("storage_summary", &value);
     }
     pub fn bind_destination(&self, root: &Path) -> Result<()> {
         // Keep this fd open from BEFORE copying: a newly opened fd at the end
@@ -287,15 +391,14 @@ impl Shared {
     }
     fn proof(&self, path: &Path, hash: &str, identity: SourceIdentity, new_write: bool) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !s.proofs.contains_key(path) {
+        // New writes were already counted per appended chunk by the writer.
+        if !new_write && !s.proofs.contains_key(path) {
             if self.verifies_writes() {
                 s.status.confirmed_bytes += identity.bytes;
                 s.status.confirmed_blocks += 1;
             }
-            if !new_write {
-                s.status.written_bytes += identity.bytes;
-                s.status.written_blocks += 1;
-            }
+            s.status.written_bytes += identity.bytes;
+            s.status.written_blocks += 1;
         }
         s.proofs.insert(path.into(), (hash.into(), identity));
     }
@@ -365,11 +468,13 @@ impl Shared {
                     previous = (Instant::now(), read, v.written_bytes);
                 }
                 events.storage_progress(&self.id, &v);
+                self.drain_diagnostics(events);
                 last = Instant::now();
             }
             std::thread::sleep(Duration::from_millis(25));
         }
         events.storage_progress(&self.id, &self.snapshot());
+        self.emit_summary(events);
     }
     pub fn finish_file(&self, path: &Path, file_id: u64, expected: &str) -> Result<()> {
         let reader = DataFile::read(path, true)?;
@@ -484,12 +589,13 @@ impl WriteContext {
         }
         s.status.phase = phase.into();
     }
-    fn store(&self, job: u64, input: PartInput) -> Result<PartReceipt> {
+    fn store(&self, job: u64, input: ChunkInput) -> Result<ChunkReceipt> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _deferred = io::DeferredSync::new(true);
+            let queued = input.started.elapsed();
             crate::io_trace::elapsed(
                 crate::io_trace::Op::QueueWait,
-                input.started.elapsed(),
+                queued,
                 input.bytes.len() as u64,
             );
             self.check()?;
@@ -497,37 +603,57 @@ impl WriteContext {
             let started = Instant::now();
             let expected = types::hex(&self.pool.hash(&input.bytes));
             let directory = input.path.parent().unwrap();
-            for path in [directory.parent().unwrap(), directory] {
-                let _trace = crate::io_trace::span(crate::io_trace::Op::Directory, 0);
-                match fs::symlink_metadata(path) {
-                    Ok(meta) => require(
-                        meta.is_dir(),
-                        "INVALID_STORAGE_PART",
-                        "storage directory is not an ordinary directory",
-                    )?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        match fs::create_dir(path) {
-                            Ok(()) => {}
-                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                                require(
-                                    fs::symlink_metadata(path)?.is_dir(),
-                                    "INVALID_STORAGE_PART",
-                                    "storage directory is not an ordinary directory",
-                                )?;
+            if input.part_offset == 0 {
+                for path in [directory.parent().unwrap(), directory] {
+                    let _trace = crate::io_trace::span(crate::io_trace::Op::Directory, 0);
+                    match fs::symlink_metadata(path) {
+                        Ok(meta) => require(
+                            meta.is_dir(),
+                            "INVALID_STORAGE_PART",
+                            "storage directory is not an ordinary directory",
+                        )?,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            match fs::create_dir(path) {
+                                Ok(()) => {}
+                                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                    require(
+                                        fs::symlink_metadata(path)?.is_dir(),
+                                        "INVALID_STORAGE_PART",
+                                        "storage directory is not an ordinary directory",
+                                    )?;
+                                }
+                                Err(error) => return Err(error.into()),
                             }
-                            Err(error) => return Err(error.into()),
                         }
+                        Err(error) => return Err(error.into()),
                     }
-                    Err(error) => return Err(error.into()),
                 }
             }
             self.hooks.at("before_segment_write")?;
             crate::destination_space::check(directory)?;
-            let mut file = io::create_new(&input.path)?;
+            if input.part_offset == 0 {
+                let created = io::create_new(&input.path)?;
+                require(
+                    input.file.set(created).is_ok(),
+                    "INVALID_STATE",
+                    "storage part opened twice",
+                )?;
+            }
+            let file = input.file.get().ok_or_else(|| {
+                Error::new(
+                    "STORAGE_WORKER_FAILED",
+                    "earlier append of this part did not open it",
+                )
+            })?;
+            require(
+                file.metadata()?.len() == input.part_offset,
+                "INVALID_STORAGE_PART",
+                "storage part append offset",
+            )?;
             {
                 let _trace =
                     crate::io_trace::span(crate::io_trace::Op::DataWrite, input.bytes.len() as u64);
-                io::write_all(&mut file, &input.bytes)?;
+                io::write_all_at(file, &input.bytes, input.part_offset)?;
             }
             let write_ms = started.elapsed().as_millis() as u64;
             {
@@ -543,26 +669,40 @@ impl WriteContext {
                     crate::io_trace::span(crate::io_trace::Op::Readback, input.bytes.len() as u64);
                 self.phase(job, "CHECKING", input.bytes.len() as u64);
                 let checking = Instant::now();
-                verify_part(&file, &expected, &self.pool, || self.check())?;
+                verify_range(
+                    file,
+                    input.part_offset,
+                    input.bytes.len() as u64,
+                    &expected,
+                    &self.pool,
+                    || self.check(),
+                )?;
+                let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                s.status.confirmed_bytes += input.bytes.len() as u64;
+                s.status.confirmed_blocks += 1;
                 checking.elapsed().as_millis() as u64
             } else {
                 0
             };
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .status
-                .last_check_elapsed_ms = check_ms;
-            Ok(PartReceipt {
-                identity: io::identity(&file)?,
-                path: input.path,
-                part: Part {
-                    path: input.relative,
-                    stream_offset: input.offset,
-                    bytes: input.bytes.len() as u64,
-                    used: input.bytes.len() as u64,
-                    blake3: expected,
-                },
+            {
+                let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                s.status.last_check_elapsed_ms = check_ms;
+                let queue_ms = queued.as_millis() as u64;
+                s.summary.chunks += 1;
+                s.summary.chunk_bytes += input.bytes.len() as u64;
+                s.summary.max_chunk_write_ms = s.summary.max_chunk_write_ms.max(write_ms);
+                s.summary.max_chunk_queue_ms = s.summary.max_chunk_queue_ms.max(queue_ms);
+                let writer = std::thread::current().name().unwrap_or("").to_string();
+                push_diagnostic(
+                    &mut s,
+                    "storage_chunk",
+                    serde_json::json!({"part":input.relative,"offset":input.part_offset,
+                        "bytes":input.bytes.len(),"source_bytes":input.source_bytes,
+                        "queue_ms":queue_ms,"write_ms":write_ms,"check_ms":check_ms,
+                        "writer":writer}),
+                );
+            }
+            Ok(ChunkReceipt {
                 source_bytes: input.source_bytes,
                 service_seconds: (write_ms + check_ms) as f64 / 1000.0,
             })
@@ -587,24 +727,38 @@ impl WriteContext {
         result
     }
 }
-struct PartInput {
+/// One bounded append into a physical part. Appends of one part run in order.
+struct ChunkInput {
     path: PathBuf,
     relative: String,
-    offset: u64,
+    part_offset: u64,
     bytes: Vec<u8>,
     source_bytes: u64,
     started: Instant,
+    file: Arc<OnceLock<File>>,
 }
-struct PartReceipt {
-    path: PathBuf,
-    part: Part,
-    identity: SourceIdentity,
+struct ChunkReceipt {
     source_bytes: u64,
     service_seconds: f64,
 }
-struct PendingPart {
+/// The physical part currently receiving appends for one logical stream.
+struct Current {
+    relative: String,
+    path: PathBuf,
+    file: Arc<OnceLock<File>>,
+    stream_offset: u64,
     bytes: u64,
-    receiver: Mutex<mpsc::Receiver<Result<PartReceipt>>>,
+    hash: blake3::Hasher,
+    chunks: u32,
+    opened: Instant,
+}
+enum PendingPart {
+    Chunk {
+        bytes: u64,
+        receiver: Mutex<mpsc::Receiver<Result<ChunkReceipt>>>,
+    },
+    /// Published only after every earlier chunk of the part has a receipt.
+    Seal(Box<(Part, PathBuf, Arc<OnceLock<File>>, u32, Instant)>),
 }
 pub(crate) struct DataFile {
     path: PathBuf,
@@ -615,10 +769,10 @@ pub(crate) struct DataFile {
     position: u64,
     shared: Option<Arc<Shared>>,
     last_flush: Instant,
-    last_persist: Instant,
-    unpublished_parts: u32,
     dirty: bool,
+    current: Option<Current>,
     pending: VecDeque<PendingPart>,
+    /// Bytes handed to writers but not yet published in the manifest.
     pending_bytes: u64,
 }
 pub(crate) struct FileMetadata(u64);
@@ -704,8 +858,7 @@ impl DataFile {
             position: 0,
             shared: None,
             last_flush: Instant::now(),
-            last_persist: Instant::now(),
-            unpublished_parts: 0,
+            current: None,
             dirty: false,
             pending: VecDeque::new(),
             pending_bytes: 0,
@@ -738,7 +891,7 @@ impl DataFile {
         let manifest = if plan.segmented_storage {
             Some(Manifest {
                 kind: "crispawn.segmented_file".into(),
-                schema_version: 1,
+                schema_version: SCHEMA,
                 backup_id: backup_id.into(),
                 file_id: id,
                 bytes: 0,
@@ -756,8 +909,7 @@ impl DataFile {
             position: 0,
             shared: Some(shared),
             last_flush: Instant::now(),
-            last_persist: Instant::now(),
-            unpublished_parts: 0,
+            current: None,
             dirty: plan.segmented_storage,
             pending: VecDeque::new(),
             pending_bytes: 0,
@@ -774,9 +926,14 @@ impl DataFile {
         }))
     }
     pub fn due(&self) -> bool {
+        let goal = if self.buffer.len() as u64 >= MIN {
+            GOAL
+        } else {
+            SMALL_GOAL
+        };
         self.manifest.is_some()
             && !self.buffer.is_empty()
-            && self.last_flush.elapsed().as_secs_f64() >= GOAL
+            && self.last_flush.elapsed().as_secs_f64() >= goal
     }
     fn persist(&mut self) -> Result<()> {
         if self.dirty {
@@ -800,21 +957,59 @@ impl DataFile {
             )?;
             self.file = crate::v2::open_owned(&self.path)?;
             self.dirty = false;
-            self.last_persist = Instant::now();
-            self.unpublished_parts = 0;
         }
         Ok(())
     }
+    fn pending_chunks(&self) -> usize {
+        self.pending
+            .iter()
+            .filter(|p| matches!(p, PendingPart::Chunk { .. }))
+            .count()
+    }
     fn receive_part(&mut self, wait: bool) -> Result<bool> {
-        let Some(pending) = self.pending.front() else {
+        let Some(front) = self.pending.front() else {
             return Ok(false);
         };
         let shared = self.shared.as_ref().unwrap().clone();
+        let PendingPart::Chunk { bytes, receiver } = front else {
+            // Every earlier chunk of this part already has a checked receipt.
+            let Some(PendingPart::Seal(sealed)) = self.pending.pop_front() else {
+                unreachable!()
+            };
+            let (part, path, file, chunks, opened) = *sealed;
+            let file = file
+                .get()
+                .ok_or_else(|| Error::new("INVALID_STATE", "sealed part was never opened"))?;
+            let identity = io::identity(file)?;
+            let m = self.manifest.as_mut().unwrap();
+            require(
+                part.stream_offset == m.bytes && identity.bytes == part.bytes,
+                "INVALID_STORAGE_PART",
+                "sealed part offset or length",
+            )?;
+            shared.proof(&path, &part.blake3, identity, true);
+            let extents = extent_count(file);
+            shared.part_sealed(
+                &part.path,
+                part.bytes,
+                chunks,
+                opened.elapsed().as_secs_f64(),
+                extents,
+            );
+            m.bytes += part.bytes;
+            self.pending_bytes -= part.bytes;
+            m.parts.push(part);
+            self.dirty = true;
+            shared.stage("SAVING_METADATA", 0);
+            self.persist()?;
+            shared.stage("READY", 0);
+            return Ok(true);
+        };
+        let size = *bytes;
         let result = if wait {
-            let _trace = crate::io_trace::span(crate::io_trace::Op::ReceiptWait, pending.bytes);
+            let _trace = crate::io_trace::span(crate::io_trace::Op::ReceiptWait, size);
             loop {
-                match pending
-                    .receiver
+                match receiver
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .recv_timeout(Duration::from_millis(25))
@@ -830,8 +1025,7 @@ impl DataFile {
                 }
             }
         } else {
-            match pending
-                .receiver
+            match receiver
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .try_recv()
@@ -847,36 +1041,10 @@ impl DataFile {
             }
         };
         let completed = result?;
-        let pending = self.pending.pop_front().unwrap();
-        let size = pending.bytes;
-        let m = self.manifest.as_mut().unwrap();
-        require(
-            completed.part.stream_offset == m.bytes && completed.part.bytes == size,
-            "INVALID_STORAGE_PART",
-            "out-of-order part publication",
-        )?;
-        shared.proof(
-            &completed.path,
-            &completed.part.blake3,
-            completed.identity,
-            true,
-        );
-        m.bytes += size;
-        m.parts.push(completed.part);
-        self.pending_bytes -= size;
-        self.dirty = true;
-        self.unpublished_parts += 1;
-        shared.stage("SAVING_METADATA", size);
-        let started = Instant::now();
-        if self.unpublished_parts >= 8 || self.last_persist.elapsed() >= Duration::from_secs(2) {
-            self.persist()?;
-        }
+        self.pending.pop_front();
         shared.credit_source(completed.source_bytes);
         shared.buffered(0, size);
-        shared.calibrate(
-            size,
-            completed.service_seconds + started.elapsed().as_secs_f64(),
-        );
+        shared.calibrate(size, completed.service_seconds);
         shared.stage("READY", 0);
         Ok(true)
     }
@@ -887,40 +1055,85 @@ impl DataFile {
         }
         Ok(())
     }
+    /// Close the current physical part; it is published after its last append.
+    fn seal_current(&mut self) {
+        if let Some(c) = self.current.take() {
+            let part = Part {
+                path: c.relative,
+                stream_offset: c.stream_offset,
+                bytes: c.bytes,
+                used: c.bytes,
+                blake3: c.hash.finalize().to_hex().to_string(),
+            };
+            self.pending.push_back(PendingPart::Seal(Box::new((
+                part, c.path, c.file, c.chunks, c.opened,
+            ))));
+        }
+    }
     fn flush_part(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
         }
         while self.receive_part(false)? {}
         // Bound per-stream completion receipts even if its first write is slow.
-        while self.pending.len()
+        while self.pending_chunks()
             >= crate::storage_worker::QUEUED + crate::storage_worker::WORKERS as usize
         {
             self.receive_part(true)?;
         }
         let shared = self.shared.as_ref().unwrap().clone();
         shared.check()?;
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|c| c.bytes + self.buffer.len() as u64 > shared.part_limit)
+        {
+            self.seal_current();
+        }
         let m = self.manifest.as_ref().unwrap();
-        require(
-            m.parts.len() + self.pending.len() < MAX_PARTS,
-            "LIMIT_EXCEEDED",
-            "too many storage parts",
-        )?;
-        let relative = format!(
-            "segments/{:08x}/{}.bin",
-            m.file_id,
-            types::hex(&io::new_id()?)
-        );
+        let sealing = self
+            .pending
+            .iter()
+            .filter(|p| matches!(p, PendingPart::Seal(_)))
+            .count();
+        if self.current.is_none() {
+            require(
+                m.parts.len() + sealing + 1 < MAX_PARTS,
+                "LIMIT_EXCEEDED",
+                "too many storage parts",
+            )?;
+            let relative = format!(
+                "segments/{:08x}/{}.bin",
+                m.file_id,
+                types::hex(&io::new_id()?)
+            );
+            self.current = Some(Current {
+                path: self.parent().join(&relative),
+                relative,
+                file: Arc::new(OnceLock::new()),
+                stream_offset: m.bytes + self.pending_bytes,
+                bytes: 0,
+                hash: blake3::Hasher::new(),
+                chunks: 0,
+                opened: Instant::now(),
+            });
+        }
+        let key = m.file_id;
         let bytes = std::mem::take(&mut self.buffer);
         let size = bytes.len() as u64;
-        let input = PartInput {
-            path: self.parent().join(&relative),
-            relative,
-            offset: m.bytes + self.pending_bytes,
+        let c = self.current.as_mut().unwrap();
+        shared.pool.update(&mut c.hash, &bytes);
+        let input = ChunkInput {
+            path: c.path.clone(),
+            relative: c.relative.clone(),
+            part_offset: c.bytes,
             bytes,
             source_bytes: self.buffer_source_bytes,
             started: Instant::now(),
+            file: c.file.clone(),
         };
+        c.bytes += size;
+        c.chunks += 1;
         let context = WriteContext {
             verify_after_write: shared.verifies_writes(),
             pool: shared.pool.clone(),
@@ -930,10 +1143,13 @@ impl DataFile {
         };
         let job = shared.next_job.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
-        shared.submit(Box::new(move || {
-            let _ = sender.send(context.store(job, input));
-        }))?;
-        self.pending.push_back(PendingPart {
+        shared.submit(
+            key,
+            Box::new(move || {
+                let _ = sender.send(context.store(job, input));
+            }),
+        )?;
+        self.pending.push_back(PendingPart::Chunk {
             bytes: size,
             receiver: Mutex::new(receiver),
         });
@@ -946,6 +1162,7 @@ impl DataFile {
     pub fn sync(&mut self) -> Result<()> {
         if self.manifest.is_some() {
             self.flush_part()?;
+            self.seal_current();
             while self.receive_part(true)? {}
             self.persist()
         } else {
@@ -995,7 +1212,7 @@ impl DataFile {
     }
     pub fn set_len(&mut self, len: u64) -> Result<()> {
         require(
-            self.pending.is_empty(),
+            self.pending.is_empty() && self.current.is_none() && self.buffer.is_empty(),
             "INVALID_STATE",
             "truncate has pending writes",
         )?;
@@ -1089,16 +1306,35 @@ fn verify_part(
     file: &File,
     expected: &str,
     pool: &CpuPool,
+    gate: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let bytes = io::identity(file)?.bytes;
+    verify_range(file, 0, bytes, expected, pool, gate)
+}
+/// Read back `length` bytes at `offset` and compare their BLAKE3.
+fn verify_range(
+    file: &File,
+    start: u64,
+    length: u64,
+    expected: &str,
+    pool: &CpuPool,
     mut gate: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let before = io::identity(file)?;
+    require(
+        start
+            .checked_add(length)
+            .is_some_and(|end| end <= before.bytes),
+        "TRUNCATED_RECORD",
+        "storage part readback range",
+    )?;
     let mut hash = blake3::Hasher::new();
     let mut offset = 0;
-    let mut buffer = vec![0; 1 << 20];
-    while offset < before.bytes {
+    let mut buffer = vec![0; (1 << 20).min(length.max(1) as usize)];
+    while offset < length {
         gate()?;
-        let n = (before.bytes - offset).min(buffer.len() as u64) as usize;
-        io::read_exact_at(file, &mut buffer[..n], offset, 1 << 20)?;
+        let n = (length - offset).min(buffer.len() as u64) as usize;
+        io::read_exact_at(file, &mut buffer[..n], start + offset, 1 << 20)?;
         pool.update(&mut hash, &buffer[..n]);
         offset += n as u64;
     }
@@ -1112,6 +1348,32 @@ fn verify_part(
         "FILE_CHANGED",
         "storage part changed during readback",
     )
+}
+/// Number of mapped extents (FIEMAP), for fragmentation diagnostics only.
+/// Unsupported filesystems return None; the result never affects the copy.
+fn extent_count(file: &File) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct Fiemap {
+        start: u64,
+        length: u64,
+        flags: u32,
+        mapped: u32,
+        count: u32,
+        reserved: u32,
+    }
+    const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
+    let mut map = Fiemap {
+        start: 0,
+        length: u64::MAX,
+        flags: 0,
+        mapped: 0,
+        count: 0,
+        reserved: 0,
+    };
+    // SAFETY: valid descriptor; with count=0 the kernel only writes the header.
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map) };
+    (result == 0).then_some(map.mapped)
 }
 impl io::Reader for DataFile {
     fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
@@ -1190,7 +1452,7 @@ mod tests {
         assert!(shared.snapshot().baseline_bytes >= MIN);
     }
     #[test]
-    fn descriptor_updates_are_batched_but_sync_publishes_all_checked_parts() {
+    fn appends_share_one_part_and_publish_the_descriptor_only_when_sealed() {
         use std::sync::atomic::AtomicUsize;
         struct Count(AtomicUsize);
         impl Hooks for Count {
@@ -1215,13 +1477,19 @@ mod tests {
         file.write_all(&vec![0x53; 8 << 20]).unwrap();
         file.sync().unwrap();
         let manifest: Manifest = io::read_json(&path).unwrap();
+        assert_eq!(manifest.schema_version, 2);
         assert_eq!(manifest.bytes, 8 << 20);
-        assert_eq!(
-            manifest.parts.len(),
-            shared.snapshot().written_blocks as usize
-        );
-        assert!(count.0.load(Ordering::Relaxed) < manifest.parts.len());
+        assert_eq!(manifest.parts.len(), 1);
+        assert_eq!(manifest.parts[0].bytes, 8 << 20);
+        assert_eq!(shared.snapshot().written_blocks, 8);
+        // One descriptor at creation and one when the part is sealed.
+        assert_eq!(count.0.load(Ordering::Relaxed), 2);
         assert_eq!(shared.snapshot().confirmed_bytes, 8 << 20);
+        assert_eq!(shared.snapshot().confirmed_blocks, 8);
+        let names = fs::read_dir(t.path().join("segments/00000000"))
+            .unwrap()
+            .count();
+        assert_eq!(names, 1);
     }
     #[test]
     fn checked_parts_credit_proportional_source_bytes_and_keep_rounding_remainders() {
@@ -1302,7 +1570,7 @@ mod tests {
         (t, s, f)
     }
     #[test]
-    fn large_descriptors_finish_verify_and_restore_after_real_small_part_writes() {
+    fn small_appends_finish_verify_and_restore_and_schema_one_parts_stay_readable() {
         use crate::{archive::CsvRows, backup, control::RunControl, restore, v2, verify};
         use crispawn_core::types::{Codec, Metadata, NoEvents};
         let mut state = 0x6a09e667f3bcc908u64;
@@ -1376,11 +1644,21 @@ mod tests {
             let hash = stored.descriptor_blake3().unwrap().unwrap();
             drop(stored);
             let bytes = fs::metadata(&path).unwrap().len();
-            assert!(bytes > 65536 && bytes <= MAX_DESCRIPTOR);
-            eprintln!("copy_readback={checked} descriptor_bytes={bytes}");
+            // Many 64 KiB appends no longer create one file or descriptor entry each.
+            assert!(bytes < 4096, "descriptor_bytes={bytes}");
+            assert!(shared.snapshot().written_blocks > 64);
+            assert_eq!(
+                DataFile::read(&path, true)
+                    .unwrap()
+                    .manifest
+                    .unwrap()
+                    .parts
+                    .len(),
+                1
+            );
             shared.finish_file(&path, entry.file_id, &hash).unwrap();
             entry.storage_descriptor_blake3 = Some(hash);
-            v2::write_indices(&archive, &[entry]).unwrap();
+            v2::write_indices(&archive, &[entry.clone()]).unwrap();
             v2::write_commit_with_verification(&archive, &meta.backup_id, checked).unwrap();
             verify::verify(&archive, t.path(), &NoEvents).unwrap();
             let target = t.path().join("target");
@@ -1389,7 +1667,49 @@ mod tests {
                     .unwrap()
                     .restored_ranges_verified
             );
-            assert_eq!(fs::read(target).unwrap(), original);
+            assert_eq!(fs::read(&target).unwrap(), original);
+            // Archives written before schema 2 used one file per <=16 MiB part
+            // and could exceed 64 KiB descriptors. They must still verify/restore.
+            let old_dir = t.path().join("schema-one");
+            fs::create_dir(&old_dir).unwrap();
+            let mut parts = vec![];
+            for (n, chunk) in encoded.chunks(64 << 10).enumerate() {
+                let relative = format!("segments/{:08x}/{n:032x}.bin", entry.file_id);
+                let part = path.parent().unwrap().join(&relative);
+                fs::create_dir_all(part.parent().unwrap()).unwrap();
+                fs::write(&part, chunk).unwrap();
+                parts.push(Part {
+                    path: relative,
+                    stream_offset: (n * (64 << 10)) as u64,
+                    bytes: chunk.len() as u64,
+                    used: chunk.len() as u64,
+                    blake3: blake3::hash(chunk).to_hex().to_string(),
+                });
+            }
+            let legacy = Manifest {
+                kind: "crispawn.segmented_file".into(),
+                schema_version: 1,
+                backup_id: meta.backup_id.clone(),
+                file_id: entry.file_id,
+                bytes: encoded.len() as u64,
+                parts,
+            };
+            let legacy_bytes = io::json(&legacy).unwrap();
+            assert!(legacy_bytes.len() > 65536);
+            fs::write(&path, &legacy_bytes).unwrap();
+            entry.storage_descriptor_blake3 =
+                Some(blake3::hash(&legacy_bytes).to_hex().to_string());
+            v2::write_indices(&archive, &[entry.clone()]).unwrap();
+            fs::remove_file(archive.join("COMMITTED")).unwrap();
+            v2::write_commit_with_verification(&archive, &meta.backup_id, checked).unwrap();
+            verify::verify(&archive, t.path(), &NoEvents).unwrap();
+            fs::remove_file(&target).unwrap();
+            assert!(
+                restore::restore(&archive, &target, false, t.path(), &NoEvents, &NoHooks)
+                    .unwrap()
+                    .restored_ranges_verified
+            );
+            assert_eq!(fs::read(&target).unwrap(), original);
             // A larger parsing budget must never bypass descriptor integrity.
             use std::io::Write;
             fs::OpenOptions::new()
@@ -1461,10 +1781,11 @@ mod tests {
             .collect::<Vec<_>>();
         f.write_all(&bytes).unwrap();
         f.sync().unwrap();
+        // Four bounded appends (write/check units) into one physical part.
         assert_eq!(s.snapshot().confirmed_blocks, 4);
         let m = f.manifest.as_ref().unwrap();
-        assert_eq!(m.parts.len(), 4);
-        assert!(m.parts.iter().all(|p| p.bytes <= 1 << 20));
+        assert_eq!(m.parts.len(), 1);
+        assert_eq!(m.parts[0].bytes, bytes.len() as u64);
         let expected = f.descriptor_blake3().unwrap().unwrap();
         let r = DataFile::read(&t.path().join("00000000.pbk.partial"), true).unwrap();
         r.check_descriptor(&expected).unwrap();
@@ -1552,7 +1873,7 @@ mod tests {
             .is_empty());
     }
     #[test]
-    fn two_writers_and_a_queued_part_stay_active_while_observer_reports_wait_time() {
+    fn two_writers_serve_two_streams_while_observer_reports_wait_time() {
         use std::sync::{atomic::AtomicUsize, Condvar};
         struct Hold(Arc<(Mutex<bool>, Condvar)>);
         impl Hooks for Hold {
@@ -1595,22 +1916,32 @@ mod tests {
             segmented_storage: true,
             ..Plan::default()
         };
-        let mut file = DataFile::create(
-            &t.path().join("00000000.pbk.partial"),
-            &plan,
-            &"1".repeat(32),
-            0,
-            shared.clone(),
-        )
-        .unwrap();
+        // Appends to one file are sequential; two streams keep both writers busy.
+        let mut files = (0..2u64)
+            .map(|id| {
+                DataFile::create(
+                    &t.path().join(format!("{id:08x}.pbk.partial")),
+                    &plan,
+                    &"1".repeat(32),
+                    id,
+                    shared.clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
         let events = Observe(AtomicUsize::new(0));
         let control = AtomicBool::new(false);
         std::thread::scope(|scope| {
             let _stop = StopMonitor(shared.clone());
             scope.spawn(|| shared.monitor(&events, &control));
             let worker = scope.spawn(|| {
-                file.write_all(&vec![9; 3 << 20])?;
-                file.sync()
+                for file in files.iter_mut() {
+                    file.write_all(&vec![9; 3 << 20])?;
+                }
+                for file in files.iter_mut() {
+                    file.sync()?;
+                }
+                Ok::<_, Error>(())
             });
             let deadline = Instant::now() + Duration::from_secs(1);
             while events.0.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
@@ -1626,5 +1957,95 @@ mod tests {
             assert!(status.calibration_elapsed_ms >= 250);
             assert!((MIN..=MAX).contains(&status.baseline_bytes));
         });
+    }
+    #[test]
+    fn zero_header_buffers_wait_longer_before_a_time_flush() {
+        let (_t, s, mut f) = fixture();
+        write_frame(
+            &mut f,
+            &crate::v2_format::Frame {
+                codec: types::Codec::Zero,
+                level: 0,
+                raw_bytes: 16 << 20,
+                payload_bytes: 0,
+            },
+            3,
+            &[],
+        )
+        .unwrap();
+        f.last_flush = Instant::now() - Duration::from_secs_f64(GOAL + 1.0);
+        assert!(
+            !f.due(),
+            "a 32-byte zero header must not become its own append"
+        );
+        f.last_flush = Instant::now() - Duration::from_secs_f64(SMALL_GOAL + 1.0);
+        assert!(f.due());
+        f.buffer.resize(MIN as usize, 1);
+        f.last_flush = Instant::now() - Duration::from_secs_f64(GOAL + 1.0);
+        assert!(f.due());
+        f.sync().unwrap();
+        assert_eq!(s.snapshot().written_blocks, 1);
+    }
+    #[test]
+    fn parts_roll_over_at_the_physical_limit_and_read_back_as_one_stream() {
+        let t = tempfile::tempdir().unwrap();
+        let mut s = Shared::new(&"1".repeat(32), 2).unwrap();
+        Arc::get_mut(&mut s).unwrap().part_limit = 3 << 20;
+        s.calibrate(1 << 20, 4.0);
+        let plan = Plan {
+            format_version: 3,
+            segmented_storage: true,
+            ..Plan::default()
+        };
+        let path = t.path().join("00000000.pbk.partial");
+        let mut f = DataFile::create(&path, &plan, &"1".repeat(32), 0, s.clone()).unwrap();
+        let bytes = (0..(8 << 20) + 5)
+            .map(|i| (i % 249) as u8)
+            .collect::<Vec<_>>();
+        f.write_all(&bytes).unwrap();
+        f.sync().unwrap();
+        let m = f.manifest.as_ref().unwrap();
+        assert_eq!(m.parts.len(), 3);
+        assert!(m.parts.iter().all(|p| p.bytes <= 3 << 20));
+        assert_eq!(
+            m.parts.iter().map(|p| p.bytes).sum::<u64>(),
+            bytes.len() as u64
+        );
+        let expected = f.descriptor_blake3().unwrap().unwrap();
+        let r = DataFile::read(&path, true).unwrap();
+        r.check_descriptor(&expected).unwrap();
+        r.verify_parts(Some(&s), &AtomicBool::new(false)).unwrap();
+        let mut actual = vec![0; bytes.len()];
+        io::read_exact_at(&r, &mut actual, 0, 777_777).unwrap();
+        assert_eq!(actual, bytes);
+        let summary = s.state.lock().unwrap().summary.parts_sealed;
+        assert_eq!(summary, 3);
+    }
+    #[test]
+    fn schema_two_parts_above_the_old_limit_are_rejected_by_schema_one_rules() {
+        let mut m = Manifest {
+            kind: "crispawn.segmented_file".into(),
+            schema_version: 2,
+            backup_id: "1".repeat(32),
+            file_id: 0,
+            bytes: PART_LIMIT,
+            parts: vec![Part {
+                path: format!("segments/00000000/{:032x}.bin", 1),
+                stream_offset: 0,
+                bytes: PART_LIMIT,
+                used: PART_LIMIT,
+                blake3: "2".repeat(64),
+            }],
+        };
+        m.validate().unwrap();
+        m.schema_version = 1;
+        assert_eq!(m.validate().unwrap_err().code, "INVALID_STORAGE_PART");
+        m.schema_version = 2;
+        m.parts[0].bytes = PART_LIMIT + 1;
+        m.parts[0].used = PART_LIMIT + 1;
+        m.bytes = PART_LIMIT + 1;
+        assert_eq!(m.validate().unwrap_err().code, "INVALID_STORAGE_PART");
+        m.schema_version = 3;
+        assert_eq!(m.validate().unwrap_err().code, "UNKNOWN_VERSION");
     }
 }

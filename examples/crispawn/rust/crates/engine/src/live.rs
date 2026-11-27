@@ -1477,6 +1477,10 @@ fn run_inner(
         );
     }
     crate::io_trace::destination(&mount.device.number);
+    diag.record(
+        "destination_writeback_limit",
+        crate::io_trace::limit_destination_writeback(&mount.device.number),
+    );
     diag.probe_interval_ms
         .store(u64::from(config.probe_interval_ms), Ordering::Relaxed);
     diag.status

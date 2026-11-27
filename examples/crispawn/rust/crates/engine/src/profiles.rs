@@ -62,7 +62,9 @@ pub fn select(
     plan.segmented_storage = true;
     plan.read_bytes = 1 << 20;
     plan.range_bytes = 16 << 20;
-    plan.container_bytes = plan.container_bytes.max(plan.range_bytes + 352);
+    // One logical stream fills one schema-2 physical part (about 1 GiB), so a
+    // backup is a few large NTFS files appended in bounded chunks.
+    plan.container_bytes = crate::storage::PART_LIMIT.max(plan.range_bytes + 352);
     plan.memory_limit_bytes = memory_bytes.min(template.memory_limit_bytes);
     plan.workers = cpus.saturating_mul(2).min(8);
     let verifiers = crate::storage_worker::WORKERS;

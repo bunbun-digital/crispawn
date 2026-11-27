@@ -534,6 +534,8 @@ impl JobEvents for Diagnostics {
                 JobEvent::ControlRejected { code, detail } => {
                     s.detail = format!("{code}: {detail}")
                 }
+                // Persisted below for analysis; no effect on status or controls.
+                JobEvent::Diagnostic { .. } => {}
             }
             if s.phase != "MENU" {
                 s.countdown_seconds = None;

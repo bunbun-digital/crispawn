@@ -903,6 +903,7 @@ fn run_inner(
                                     read_seconds,
                                     read_bytes,
                                     writer_seconds: 0.0,
+                                    probe_stored: None,
                                 };
                                 hooks.at("after_codec_encode")?;
                                 Ok(Ready {

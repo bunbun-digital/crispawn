@@ -239,10 +239,23 @@ fn produce(
     let mut paused = false;
     let mut resume_epoch = 0;
     let mut last_prefetch = std::time::Instant::now() - Duration::from_secs(1);
+    // Per stored profile: frames, raw bytes, stored bytes, encode CPU seconds.
+    let mut codec_totals: BTreeMap<String, (u64, u64, u64, f64)> = BTreeMap::new();
+    let mut probe_totals = (0u64, 0u64, 0u64);
     pool.pool().in_place_scope(|scope| -> Result<()> {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
             loop {
                 control.check_cancel()?;
+                {
+                    let fill = queue.state.lock().unwrap_or_else(|e| e.into_inner()).bytes as f64
+                        / queue.budget.max(1) as f64;
+                    let idle_writers = queue.storage.as_ref().is_none_or(|s| {
+                        s.snapshot().active_write_workers < crate::storage_worker::WORKERS
+                    });
+                    if let Some(reason) = feedback.pressure(fill, idle_writers) {
+                        events.settings(&feedback.active, feedback.verifiers, meta.source.bytes, &reason);
+                    }
+                }
                 if paused && !control.pause_requested() {
                     feedback.resumed();
                     paused = false;
@@ -261,6 +274,7 @@ fn produce(
                         continue;
                     }
                     let (profile, read_bytes) = saved.unwrap_or_else(||feedback.next(lane));
+                    let probe = saved.is_none() && feedback.probe_due(lane);
                     let send = sender.clone();
                     let gate = gate.clone();
                     let control = &control;
@@ -294,7 +308,7 @@ fn produce(
                                     crate::online::cpu_seconds(libc::CLOCK_THREAD_CPUTIME_ID);
                                 let encoded =
                                     codec::encode(raw.clone(), profile.codec, profile.level)?;
-                                let observation = crate::online::Observation {
+                                let mut observation = crate::online::Observation {
                                     lane,
                                     requested: profile,
                                     actual: encoded.codec,
@@ -307,7 +321,18 @@ fn produce(
                                     read_seconds,
                                     read_bytes,
                                     writer_seconds: 0.0,
+                                    probe_stored: None,
                                 };
+                                // Measurement only: the zstd-3 size of the same raw
+                                // frame is logged and discarded, never stored.
+                                if probe && encoded.codec != crispawn_core::types::Codec::Zero {
+                                    observation.probe_stored = Some(
+                                        codec::encode(raw.clone(), crispawn_core::types::Codec::Zstd, 3)?
+                                            .payload
+                                            .len() as u64
+                                            + format::FRAME_HEADER as u64,
+                                    );
+                                }
                                 hooks.at("after_codec_encode")?;
                                 Ok(Work::Ready(Ready {
                                     range,
@@ -328,6 +353,17 @@ fn produce(
                 }
                 if outstanding == 0 {
                     if exhausted && deferred.is_empty() {
+                        events.diagnostic(
+                            "codec_summary",
+                            &serde_json::json!({
+                                "profiles": codec_totals.iter().map(|(k, v)| serde_json::json!({
+                                    "profile": k, "frames": v.0, "raw_bytes": v.1,
+                                    "stored_bytes": v.2, "encode_cpu_seconds": (v.3 * 1000.0).round() / 1000.0,
+                                })).collect::<Vec<_>>(),
+                                "probe": {"frames": probe_totals.0, "held_stored_bytes": probe_totals.1,
+                                          "zstd3_stored_bytes": probe_totals.2},
+                            }),
+                        );
                         let queued = queue.state.lock().unwrap_or_else(|e| e.into_inner()).bytes;
                         events.prefetch(
                             &meta.backup_id,
@@ -394,6 +430,31 @@ fn produce(
                             observed.seconds_per_stored * ready.observation.stored as f64;
                         feedback
                             .verification_service(observed.verify_bytes, observed.verify_seconds);
+                        {
+                            let o = &ready.observation;
+                            let profile = format::profile_name(ready.encoded.codec, ready.encoded.level);
+                            events.diagnostic(
+                                "frame",
+                                &serde_json::json!({
+                                    "lane": lane, "range": ready.range, "raw": o.raw, "stored": o.stored,
+                                    "profile": profile,
+                                    "requested": format::profile_name(o.requested.codec, o.requested.level),
+                                    "encode_cpu_ms": (o.encode_cpu * 1e6).round() / 1000.0,
+                                    "held": feedback.held().is_some(),
+                                    "probe_zstd3_stored": o.probe_stored,
+                                }),
+                            );
+                            let total = codec_totals.entry(profile).or_default();
+                            total.0 += 1;
+                            total.1 += o.raw;
+                            total.2 += o.stored;
+                            total.3 += o.encode_cpu;
+                            if let Some(probe) = o.probe_stored {
+                                probe_totals.0 += 1;
+                                probe_totals.1 += o.stored;
+                                probe_totals.2 += probe;
+                            }
+                        }
                         if let Some(reason) = feedback.observe(&ready.observation, observed.backlog)
                         {
                             if plan.segmented_storage {feedback.verifiers=crate::storage_worker::WORKERS;}

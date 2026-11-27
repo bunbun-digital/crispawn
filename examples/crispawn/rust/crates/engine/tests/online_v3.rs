@@ -135,7 +135,7 @@ fn versioned_frame_vocabulary_rejects_unknown_levels_and_cross_version_headers()
     let p = plan();
     for (codec, levels) in [
         (Codec::Zstd, vec![1, 3, 6, 9]),
-        (Codec::Xz, vec![0, 3]),
+        (Codec::Xz, vec![0, 3, 6]),
         (Codec::Gzip, vec![1, 6, 9]),
     ] {
         for level in levels {
@@ -149,14 +149,16 @@ fn versioned_frame_vocabulary_rejects_unknown_levels_and_cross_version_headers()
             assert!(Frame::decode(&frame.encode(2), &p).is_err());
         }
     }
+    // xz:6 is written only while a writer backlog holds xz (schema-2 archives).
     let invalid = Frame {
         codec: Codec::Xz,
-        level: 6,
+        level: 9,
         raw_bytes: 8192,
         payload_bytes: 128,
     };
     assert!(Frame::decode(&invalid.encode(3), &p).is_err());
-    for value in ["", "xz:6", "raw:00", "zero:0;raw:0", "zstd:3;zstd:3"] {
+    assert!(v2_format::valid_profiles("xz:6"));
+    for value in ["", "xz:9", "raw:00", "zero:0;raw:0", "zstd:3;zstd:3"] {
         assert!(!v2_format::valid_profiles(value));
     }
 }

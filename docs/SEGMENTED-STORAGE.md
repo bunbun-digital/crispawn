@@ -17,6 +17,43 @@ media layout v2 and runtime configuration v2. Old plans omit it and retain
 their contiguous-file behavior. Older ISOs reject the new plan field; use this
 ISO or a newer compatible version to restore a newly segmented backup.
 
+## Descriptor schema 2: few large appended parts
+
+New backups (from 0.1.0-alpha.5) write descriptor `schema_version: 2`.
+Earlier releases created one physical file per write unit (at most 16 MiB) and
+replaced the descriptor every eight parts or two seconds. A real USB run with
+about 60 GB stored produced 14,357 part files; 4,182 were at most 1 KiB and
+3,748 were exactly 32 bytes, i.e. one all-zero 16 MiB frame header per file.
+Each new file costs NTFS MFT allocation, directory-index and descriptor
+replacement work on the slow device.
+
+Schema 2 separates the **write unit** from the **file unit**:
+
+- A logical stream appends bounded *chunks* (the calibrated baseline, at most
+  16 MiB) to one physical part file. Chunks are the write, readback-check,
+  progress and calibration unit, exactly as parts were before.
+- A part is closed when the next chunk would exceed 1 GiB (1,073,741,824 bytes,
+  below the 2,000,000,000-byte ceiling) or when its stream seals or checkpoints.
+  Automatic-copy plans use 1 GiB containers, so one stream normally fills one part.
+- The descriptor is published when a part is sealed (and at creation), not after
+  every few chunks. Its `parts` fields are unchanged: path, stream offset,
+  length, used length and the BLAKE3 of the complete file. The whole-file BLAKE3
+  is accumulated in order from the encoded bytes in RAM before they are written.
+- Appends to one file are sequential: a file has at most one write in progress,
+  in stream order. The two writers serve different files (streams). Linux
+  serializes writes to one inode, so a second concurrent writer on the same file
+  would not add throughput. Startup and the last remaining stream may use one
+  writer; no dummy writes are generated.
+- A buffer smaller than 64 KiB (typically zero-frame headers) waits 30 seconds,
+  instead of five, before a time-based flush, so zero-filled disk regions no
+  longer create tiny appends. Size-based flushes and stream seals are unchanged.
+
+Schema 1 descriptors (up to 16 MiB per part, any number of parts within the
+existing limits) remain readable for verification and restore. Older ISOs reject
+`schema_version: 2` with `UNKNOWN_VERSION`; restore new backups with this ISO or
+a compatible newer release. GPT/whole-disk coverage, source-range BLAKE3,
+`files.csv` and COMMITTED semantics are unchanged.
+
 ## Logical data and physical files
 
 The logical PBK3 stream and the source-range BLAKE3 are retained. Compression
@@ -26,7 +63,7 @@ frame. Read size, compression-frame size and storage-file size are independent.
 
 In this layout a `data/<id>.pbk` file is a bounded JSON descriptor, rather than
 the compressed payload itself. Its `kind` is `crispawn.segmented_file` and its
-`schema_version` is 1. It records `backup_id`, `file_id`, logical stream `bytes`
+`schema_version` is 1 (one file per write unit) or 2 (appended large parts). It records `backup_id`, `file_id`, logical stream `bytes`
 and an ordered `parts` array. Each part records:
 
 | Field | Meaning |
@@ -51,7 +88,7 @@ referenced parts are required together.
 
 ## Calibration and size limits
 
-The first physical part is at most 1 MiB. A very fast cached admission does
+The first appended chunk is at most 1 MiB. A very fast cached admission does
 not increase this baseline: copying into RAM is not USB media throughput.
 There is no separate disposable write trial.
 
@@ -98,9 +135,10 @@ During productive copying there is no per-part, per-descriptor or per-journal
 sync is suspended during copying and forced on final/error close. This avoids
 another device flush from each progress record or log rotation.
 
-Descriptor JSON is replaced after eight accepted parts or two seconds at a
-safe receipt boundary, and always by an explicit stream sync/checkpoint/seal.
-This reduces NTFS file creation, replacement and directory-index updates. There
+Schema 2 replaces descriptor JSON only when a part is sealed: when it reaches
+1 GiB or at an explicit stream sync/checkpoint/seal. (Schema 1 replaced it after
+eight accepted parts or two seconds.) This reduces NTFS file creation,
+replacement and directory-index updates. There
 is no new on-disk format. In-process checked/source credit can use the validated
 in-memory mapping; it does not promise intermediate power-loss recovery. Every
 mapping is published before a checkpoint/seal and the final COMMITTED barrier.
@@ -175,9 +213,10 @@ and NTFS dirty-volume refusal are unchanged.
 
 ## Limits and validation
 
-Staging, six queued/active part buffers, active-part receipts, encoder workspaces and the productive queue
+Staging, six queued/active chunk buffers, active-chunk receipts, encoder workspaces and the productive queue
 are reserved together. Each descriptor is at most 8 MiB and contains at most
-32,768 parts. Physical files remain below the product's 2,000,000,000-byte ceiling.
+32,768 parts. Schema-1 parts are at most 16 MiB; schema-2 parts at most 1 GiB.
+Physical files remain below the product's 2,000,000,000-byte ceiling.
 
 The descriptor reader uses this same 8 MiB limit during copy sealing, explicit
 verification, recovery and restoration. Generic JSON metadata retains its 64 KiB

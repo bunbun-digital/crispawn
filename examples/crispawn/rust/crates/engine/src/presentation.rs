@@ -36,6 +36,7 @@ pub fn text(event: &JobEvent) -> String {
         JobEvent::ReadAhead { read_raw_bytes, queued_encoded_bytes, queue_budget_bytes, .. } =>
             format!("[READ_AHEAD] 読出={} bytes 圧縮済み待機={} / {} bytes", clean(read_raw_bytes), clean(queued_encoded_bytes), clean(queue_budget_bytes)),
         JobEvent::StorageProgress {status,..} => format!("[STORAGE] {} 待ち={} blocks 現在={} bytes 並列={} 読出={:.1} MB/s 書込={:.1} MB/s 圧縮後保存={} 圧縮後確認={} 確認済み元データ換算={}",clean(&status.phase),status.waiting_blocks,status.current_file_bytes,status.write_workers,status.read_mb_per_second,status.write_mb_per_second,status.written_bytes,status.confirmed_bytes,status.confirmed_source_bytes),
+        JobEvent::Diagnostic { name, .. } => format!("[DIAG] {}", clean(name)),
         JobEvent::Finished { success, code, report_file, dataset_committed } =>
             format!("[{}] {} 確定済={} レポート={}", if *success { "完了" } else { "停止" },
                 clean(code), dataset_committed, clean(&report_file.to_string_lossy())),

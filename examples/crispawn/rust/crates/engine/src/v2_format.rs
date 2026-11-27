@@ -200,7 +200,7 @@ pub fn allowed(codec: Codec, level: i32) -> bool {
     match codec {
         Codec::Raw | Codec::Zero => level == 0,
         Codec::Zstd => matches!(level, 1 | 3 | 6 | 9),
-        Codec::Xz => matches!(level, 0 | 3),
+        Codec::Xz => matches!(level, 0 | 3 | 6),
         Codec::Gzip => matches!(level, 1 | 6 | 9),
     }
 }

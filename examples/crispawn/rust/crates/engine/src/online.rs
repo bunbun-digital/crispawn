@@ -4,7 +4,7 @@
 use crate::{profiles, Result};
 use crispawn_core::{error::require, plan::Plan, types::Codec};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Limit read/encode work independently of bounded result prefetch. Waiting
 /// workers never hold a permit needed by the coordinator or hash workers.
@@ -57,7 +57,7 @@ pub struct Profile {
     pub codec: Codec,
     pub level: i32,
 }
-const PROFILES: [Profile; 10] = [
+const PROFILES: [Profile; PROFILE_COUNT] = [
     Profile {
         codec: Codec::Zstd,
         level: 3,
@@ -98,8 +98,24 @@ const PROFILES: [Profile; 10] = [
         codec: Codec::Gzip,
         level: 9,
     },
+    // Used only while writer backlog holds xz (see `pressure`).
+    Profile {
+        codec: Codec::Xz,
+        level: 6,
+    },
 ];
-const PRIOR: [f64; 10] = [1.0, 1.61, 1.55, 78.71, 120.55, 0.8, 0.02, 4.0, 8.0, 10.0];
+const PRIOR: [f64; PROFILE_COUNT] = [
+    1.0, 1.61, 1.55, 78.71, 120.55, 0.8, 0.02, 4.0, 8.0, 10.0, 150.0,
+];
+const PROFILE_COUNT: usize = 11;
+/// Indices into PROFILES used while the writer is the bottleneck: xz-6, then xz-3.
+const HOLD: [usize; 2] = [10, 4];
+/// Queue fill (encoded bytes / budget) treated as a writer backlog.
+const BACKLOG_FILL: f64 = 0.5;
+/// Queue fill below which idle writers mean the encoders cannot keep up.
+const STARVED_FILL: f64 = 0.1;
+/// Every Nth held frame is also measured with zstd-3, for logs only.
+pub const PROBE_EVERY: u64 = 64;
 #[derive(Default, Clone, Copy)]
 struct Cost {
     count: u64,
@@ -124,6 +140,17 @@ pub struct Observation {
     pub read_seconds: f64,
     pub read_bytes: u64,
     pub writer_seconds: f64,
+    /// zstd-3 stored size of the same raw frame, measured for logs only.
+    pub probe_stored: Option<u64>,
+}
+/// Writer-backlog codec hold. Only newly read frames are affected; frames
+/// already encoded or queued are never re-encoded.
+pub struct Hold {
+    pub level: Option<usize>,
+    backlog_since: Option<Instant>,
+    starved_since: Option<Instant>,
+    pub enter_after: Duration,
+    pub release_after: Duration,
 }
 /// Immutable plan describes ceilings, including the largest permitted encoder.
 /// Starting P remains min(2N,8); allocating capacity never makes it the active P.
@@ -166,7 +193,7 @@ pub struct Feedback {
     maximum: u32,
     max_verify: u32,
     cpus: u32,
-    cost: [[Cost; 10]; 64],
+    cost: [[Cost; PROFILE_COUNT]; 64],
     best: [usize; 64],
     zero: [bool; 64],
     compressible: [bool; 64],
@@ -182,6 +209,7 @@ pub struct Feedback {
     plateau: u32,
     seconds_per_raw: f64,
     io_per_stored: f64,
+    pub hold: Hold,
 }
 impl Feedback {
     pub fn new(plan: &Plan, verifiers: u32, cpus: u32) -> Self {
@@ -198,7 +226,7 @@ impl Feedback {
             max_verify: verifiers,
             cpus: cpus.max(1),
             cpu_fraction: 0.0,
-            cost: [[Cost::default(); 10]; 64],
+            cost: [[Cost::default(); PROFILE_COUNT]; 64],
             best: [best; 64],
             zero: [false; 64],
             compressible: std::array::from_fn(|i| i >= (plan.regions as usize).div_ceil(2)),
@@ -214,7 +242,66 @@ impl Feedback {
             plateau: 0,
             seconds_per_raw: 0.0,
             io_per_stored: 1.0 / 100e6 + 1.0 / 500e6,
+            hold: Hold {
+                level: None,
+                backlog_since: None,
+                starved_since: None,
+                enter_after: Duration::from_secs(30),
+                release_after: Duration::from_secs(10),
+            },
         }
+    }
+    /// Current held profile, if the writer backlog keeps xz selected.
+    pub fn held(&self) -> Option<Profile> {
+        self.hold.level.map(|l| PROFILES[HOLD[l]])
+    }
+    /// Whether this held frame should also be measured with zstd-3 for logs.
+    pub fn probe_due(&self, lane: usize) -> bool {
+        self.hold.level.is_some() && self.jobs[lane] % PROBE_EVERY == 0
+    }
+    /// Update the writer-backlog hold from the encoded queue fill and writer
+    /// activity. Enter xz-6 after a sustained backlog with spare CPU; step down
+    /// (xz-3, then the adaptive choice) only when writers starve. Returns a
+    /// reason with the inputs whenever the mode changes.
+    pub fn pressure(&mut self, fill: f64, idle_writers: bool) -> Option<String> {
+        let now = Instant::now();
+        let backlog = fill >= BACKLOG_FILL && self.cpu_fraction < 0.80;
+        let starved = (fill < STARVED_FILL && idle_writers) || self.cpu_fraction >= 0.90;
+        let h = &mut self.hold;
+        let previous = h.level;
+        if backlog && h.level != Some(0) {
+            let since = *h.backlog_since.get_or_insert(now);
+            if now.duration_since(since) >= h.enter_after {
+                h.level = Some(0);
+                h.backlog_since = None;
+            }
+        } else if !backlog {
+            h.backlog_since = None;
+        }
+        if starved && h.level.is_some() {
+            let since = *h.starved_since.get_or_insert(now);
+            if now.duration_since(since) >= h.release_after {
+                h.level = match h.level {
+                    Some(0) => Some(1),
+                    _ => None,
+                };
+                h.starved_since = None;
+                h.backlog_since = None;
+            }
+        } else if !starved {
+            h.starved_since = None;
+        }
+        (h.level != previous).then(|| {
+            if let Some(p) = self.held() {
+                (self.active.codec, self.active.compression_level) = (p.codec, p.level);
+            }
+            format!(
+                "writer_backlog_hold from={} to={} queue_fill={fill:.3} idle_writers={idle_writers} cpu_fraction={:.3}",
+                previous.map_or("adaptive".into(), |l| crate::v2_format::profile_name(PROFILES[HOLD[l]].codec, PROFILES[HOLD[l]].level)),
+                self.held().map_or("adaptive".into(), |p| crate::v2_format::profile_name(p.codec, p.level)),
+                self.cpu_fraction,
+            )
+        })
     }
     pub fn resumed(&mut self) {
         self.epoch_bytes = 0;
@@ -225,6 +312,11 @@ impl Feedback {
     }
     pub fn next(&mut self, lane: usize) -> (Profile, u64) {
         self.jobs[lane] += 1;
+        // A writer backlog with spare CPU keeps xz for new reads, including
+        // hard-to-compress data. Zero frames are detected before any encoder.
+        if let Some(profile) = self.held().filter(|_| self.cpu_fraction < 0.95) {
+            return (profile, self.active.read_bytes.min(self.active.range_bytes));
+        }
         let mut chosen = if self.cpu_fraction >= 0.95 {
             5
         } else if self.cpu_fraction >= 0.90 {
@@ -277,7 +369,7 @@ impl Feedback {
             if ratio < 0.95 {
                 self.compressible[o.lane] = true;
             }
-            if ratio >= 0.98 && i == self.best[o.lane] {
+            if ratio >= 0.98 && i == self.best[o.lane] && self.hold.level.is_none() {
                 self.compressible[o.lane] = false;
                 self.best[o.lane] = if i == 6 { 6 } else { 0 };
             }
@@ -347,8 +439,8 @@ impl Feedback {
             }
         }
         .min(self.active.range_bytes);
-        self.active.codec = PROFILES[self.best[o.lane]].codec;
-        self.active.compression_level = PROFILES[self.best[o.lane]].level;
+        let shown = self.held().unwrap_or(PROFILES[self.best[o.lane]]);
+        (self.active.codec, self.active.compression_level) = (shown.codec, shown.level);
         self.epoch_bytes = 0;
         self.start = Instant::now();
         self.start_cpu = now;
@@ -458,6 +550,7 @@ mod tests {
             read_seconds: 0.25,
             read_bytes,
             writer_seconds: 0.5,
+            probe_stored: None,
         };
         f.observe(&observation, 0);
         assert_eq!(
@@ -469,5 +562,83 @@ mod tests {
         f.observe(&observation, 0);
         assert_eq!(f.best[0], 0, "incompressible data returns to the baseline");
         assert!(f.zero[7]);
+    }
+    #[test]
+    fn sustained_writer_backlog_holds_xz_and_starved_writers_step_down() {
+        let mut p = Plan::current();
+        p.format_version = 3;
+        p.memory_limit_bytes = 4 << 30;
+        let mut f = Feedback::new(&p, 2, 16);
+        f.hold.enter_after = Duration::from_millis(30);
+        f.hold.release_after = Duration::from_millis(30);
+        f.cpu_fraction = 0.05;
+        assert!(
+            f.pressure(0.9, false).is_none(),
+            "a short backlog is not a hold"
+        );
+        std::thread::sleep(Duration::from_millis(40));
+        let reason = f.pressure(0.9, false).unwrap();
+        assert!(reason.contains("to=xz:6"), "{reason}");
+        // Hard-to-compress data and zero lanes still use the held encoder.
+        f.zero[3] = true;
+        assert_eq!(
+            f.next(3).0,
+            Profile {
+                codec: Codec::Xz,
+                level: 6
+            }
+        );
+        let held = Observation {
+            lane: 0,
+            requested: f.next(0).0,
+            actual: Codec::Xz,
+            raw: 16 * MIB,
+            stored: 16 * MIB,
+            encode_cpu: 3.0,
+            read_seconds: 0.1,
+            read_bytes: MIB,
+            writer_seconds: 6.0,
+            probe_stored: None,
+        };
+        f.observe(&held, 0);
+        assert_eq!(
+            f.next(0).0,
+            Profile {
+                codec: Codec::Xz,
+                level: 6
+            }
+        );
+        // A brief dip in the queue is not starvation.
+        assert!(f.pressure(0.05, false).is_none());
+        assert!(f.pressure(0.05, true).is_none());
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(f.pressure(0.05, true).unwrap().contains("to=xz:3"));
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(f.pressure(0.05, true).is_none());
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(f.pressure(0.05, true).unwrap().contains("to=adaptive"));
+        assert_ne!(f.next(0).0.level, 6);
+        // CPU pressure never enters a hold and releases an existing one.
+        f.cpu_fraction = 0.85;
+        assert!(f.pressure(0.9, false).is_none());
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(f.pressure(0.9, false).is_none());
+        assert!(f.held().is_none());
+    }
+    #[test]
+    fn held_frames_are_probed_for_logs_at_a_fixed_interval() {
+        let mut p = Plan::current();
+        p.format_version = 3;
+        p.memory_limit_bytes = 4 << 30;
+        let mut f = Feedback::new(&p, 2, 16);
+        assert!(!f.probe_due(0));
+        f.hold.level = Some(0);
+        let probes = (0..PROBE_EVERY * 2)
+            .filter(|_| {
+                f.next(0);
+                f.probe_due(0)
+            })
+            .count();
+        assert_eq!(probes, 2);
     }
 }

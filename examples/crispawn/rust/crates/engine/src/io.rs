@@ -94,10 +94,13 @@ pub fn write_all(writer: &mut (impl Write + ?Sized), mut bytes: &[u8]) -> Result
     Ok(())
 }
 pub fn sync_file(file: &File) -> Result<()> {
+    sync_file_as(file, crate::io_trace::Op::FileSync)
+}
+fn sync_file_as(file: &File, op: crate::io_trace::Op) -> Result<()> {
     if DEFER_SYNC.with(Cell::get) {
         return Ok(());
     }
-    let _trace = crate::io_trace::span(crate::io_trace::Op::FileSync, 0);
+    let _trace = crate::io_trace::span(op, 0);
     // EIO from writeback can mean previously accepted data was lost. A later
     // successful fsync alone cannot certify recovery; do not hide that error.
     retry(true, || file.sync_all().map_err(Error::from))?;
@@ -351,20 +354,31 @@ pub fn hash_file(file: &File) -> Result<String> {
     Ok(hex(&h.finalize()))
 }
 pub fn atomic_write(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    use crate::io_trace::Op;
+    // Account RAM-backed runtime status files separately from NTFS metadata.
+    let runtime = root.starts_with("/run") || root.starts_with("/dev/shm");
+    let (create, rename, sync) = if runtime {
+        (Op::RuntimeCreate, Op::RuntimeRename, Op::RuntimeSync)
+    } else {
+        (Op::Create, Op::Rename, Op::FileSync)
+    };
     let mut temp = {
-        let _trace = crate::io_trace::span(crate::io_trace::Op::Create, 0);
+        let _trace = crate::io_trace::span(create, 0);
         tempfile::Builder::new()
             .prefix(".pbk-write-")
             .tempfile_in(root)?
     };
     write_all(&mut temp, bytes)?;
-    sync_file(temp.as_file())?;
+    sync_file_as(temp.as_file(), sync)?;
     {
-        let _trace = crate::io_trace::span(crate::io_trace::Op::Rename, 0);
+        let _trace = crate::io_trace::span(rename, 0);
         temp.persist(root.join(name))
             .map_err(|e| Error::from(e.error))?;
     }
-    sync_dir(root)
+    sync_file_as(
+        &retry(false, || File::open(root).map_err(Error::from))?,
+        sync,
+    )
 }
 /// Atomic seal that never replaces an existing data container.
 pub fn rename_new(source: &Path, target: &Path) -> Result<()> {

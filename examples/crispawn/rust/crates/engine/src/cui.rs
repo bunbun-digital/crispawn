@@ -206,6 +206,9 @@ fn run(mut options: Options) -> Result<()> {
                 serde_json::to_writer(&mut stdout, &value)
                     .map_err(std::io::Error::other)
                     .and_then(|_| stdout.write_all(b"\n"))
+            } else if matches!(event, JobEvent::Diagnostic { .. }) {
+                // Analysis records go to the JSON/NTFS log, not the text console.
+                Ok(())
             } else {
                 writeln!(stdout, "{}", presentation::text(&event))
             };

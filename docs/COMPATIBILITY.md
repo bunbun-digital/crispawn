@@ -36,6 +36,12 @@ field; use this ISO or a compatible newer release to restore segmented backups.
 The layout, original-data and stored-data hashes, limits and progress units are
 specified in [Segmented compressed storage](SEGMENTED-STORAGE.md).
 
+From 0.1.0-alpha.5, new backups use segmented descriptor schema 2 (large
+appended part files) and may contain `xz:6` frames while a writer backlog holds
+xz. Both are additive: this ISO still reads schema-1 descriptors and every
+earlier frame profile. ISOs before alpha.5 reject schema-2 descriptors and
+`xz:6` frames; restore such backups with alpha.5 or a compatible newer release.
+
 ## USB media layout v2
 
 The ISO contains `/boot/crispawn-media.json` with exactly these five fields:

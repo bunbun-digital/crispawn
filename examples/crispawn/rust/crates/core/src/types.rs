@@ -231,6 +231,9 @@ pub trait EventSink: Send + Sync {
         _reason: &str,
     ) {
     }
+    /// Bounded diagnostic records (per frame, per storage chunk/part, totals)
+    /// for later analysis. They never affect coverage, hashes or control.
+    fn diagnostic(&self, _name: &str, _value: &serde_json::Value) {}
 }
 fn is_zero(value: &u64) -> bool {
     *value == 0

@@ -24,7 +24,7 @@ use std::{
 };
 const MAGIC: u64 = 0x4350494f54524331;
 const SLOTS: usize = 256;
-const OPS: usize = 20;
+const OPS: usize = 23;
 const TRACE_CAP: u64 = 8 << 20;
 fn encoded(value: &Value) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| Error::new("JSON_ERROR", e.to_string()))
@@ -71,6 +71,10 @@ pub(crate) enum Op {
     ReceiptWait,
     SourceRead,
     SourceCache,
+    /// RAM-backed runtime files (/run, /dev/shm), kept apart from NTFS work.
+    RuntimeCreate,
+    RuntimeRename,
+    RuntimeSync,
 }
 fn name(index: usize) -> &'static str {
     match index {
@@ -93,6 +97,9 @@ fn name(index: usize) -> &'static str {
         17 => "writer_receipt_wait",
         18 => "source_read",
         19 => "source_cache_release",
+        20 => "runtime_file_create",
+        21 => "runtime_rename",
+        22 => "runtime_file_sync",
         _ => "idle",
     }
 }
@@ -448,6 +455,80 @@ fn device_info(number: &str) -> Value {
     *cache = Some((number.into(), value.clone()));
     value
 }
+/// Page-cache writeback counters (pages) that explain balance_dirty_pages waits.
+fn vmstat() -> Value {
+    const KEYS: [&str; 6] = [
+        "nr_dirty",
+        "nr_writeback",
+        "nr_dirty_threshold",
+        "nr_dirty_background_threshold",
+        "nr_written",
+        "nr_dirtied",
+    ];
+    let mut out = serde_json::Map::new();
+    if let Value::String(s) = text("/proc/vmstat", 16384) {
+        for line in s.lines() {
+            let mut fields = line.split_whitespace();
+            if let (Some(key), Some(value)) = (fields.next(), fields.next()) {
+                if KEYS.contains(&key) {
+                    if let Ok(v) = value.parse::<u64>() {
+                        out.insert(key.into(), json!(v));
+                    }
+                }
+            }
+        }
+    }
+    Value::Object(out)
+}
+/// Dirty page-cache ceiling for the backup destination device only.
+pub(crate) const DESTINATION_DIRTY_BYTES: u64 = 256 << 20;
+/// Bound the destination's dirty page cache so that a slow USB device does
+/// not accumulate minutes of unwritten data. Throughput remains limited by
+/// the device; the final sync, failure log export and unmount then complete
+/// within a bounded time. Best effort: failures are reported, never fatal.
+pub(crate) fn limit_destination_writeback(number: &str) -> Value {
+    if !valid_number(number) {
+        return json!({"applied":false,"error":"invalid device number"});
+    }
+    let Some(bdi) = bdi_dir(number) else {
+        return json!({"applied":false,"error":"bdi not found"});
+    };
+    let previous = bdi_info(number);
+    let mut errors = vec![];
+    for (name, value) in [
+        ("max_bytes", DESTINATION_DIRTY_BYTES.to_string()),
+        ("strict_limit", "1".to_string()),
+    ] {
+        if let Err(error) = fs::write(bdi.join(name), &value) {
+            errors.push(json!({"setting":name,"errno":error.raw_os_error()}));
+        }
+    }
+    json!({"applied":errors.is_empty(),"requested_max_bytes":DESTINATION_DIRTY_BYTES,
+        "previous":previous,"current":bdi_info(number),"errors":errors})
+}
+fn bdi_dir(number: &str) -> Option<std::path::PathBuf> {
+    fs::read_link(format!("/sys/dev/block/{number}"))
+        .ok()
+        .and_then(|link| {
+            let path = std::path::Path::new("/sys/dev/block").join(link);
+            // A partition's parent directory is the whole disk with the bdi.
+            let parent = if path.join("partition").exists() {
+                path.parent()?.to_path_buf()
+            } else {
+                path
+            };
+            Some(parent.join("bdi"))
+        })
+}
+/// Per-device writeback settings (read-only observation).
+fn bdi_info(number: &str) -> Value {
+    let Some(bdi) = bdi_dir(number) else {
+        return Value::Null;
+    };
+    json!({"max_ratio":text(bdi.join("max_ratio"),64),"min_ratio":text(bdi.join("min_ratio"),64),
+        "max_bytes":text(bdi.join("max_bytes"),64),"strict_limit":text(bdi.join("strict_limit"),64),
+        "read_ahead_kb":text(bdi.join("read_ahead_kb"),64)})
+}
 fn text(path: impl AsRef<Path>, cap: u64) -> Value {
     match File::open(path).and_then(|file| {
         let mut s = String::new();
@@ -510,6 +591,7 @@ fn sample(map: &Mapping, pid: u32, stacks: bool) -> Value {
         "memory":crate::memory::sample(),"io_pressure":text("/proc/pressure/io",1024),
         "dirty_limits":{"bytes":text("/proc/sys/vm/dirty_bytes",64),"ratio":text("/proc/sys/vm/dirty_ratio",64),
             "background_bytes":text("/proc/sys/vm/dirty_background_bytes",64),"background_ratio":text("/proc/sys/vm/dirty_background_ratio",64)},
+        "vmstat":vmstat(),"bdi":device.as_deref().map(bdi_info),
         "destination":block,"device_info":device.as_deref().map(device_info),"observer_pid":std::process::id(),
         "note":"inclusive elapsed times may overlap; block completion is not a durability guarantee"})
 }
@@ -645,5 +727,12 @@ mod tests {
         assert!(encoded(&finished).unwrap().len() < 32 << 10);
         assert!(finished["dirty_limits"].is_object());
         assert!(!valid_number("8:2/../../"));
+    }
+    #[test]
+    fn destination_writeback_limit_reports_unknown_devices_without_failing() {
+        let value = limit_destination_writeback("4095:1048575");
+        assert_eq!(value["applied"], false);
+        assert_eq!(limit_destination_writeback("../x")["applied"], false);
+        assert!(vmstat().is_object());
     }
 }

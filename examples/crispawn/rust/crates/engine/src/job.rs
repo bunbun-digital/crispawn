@@ -66,6 +66,10 @@ pub enum JobEvent {
         backup_id: String,
         status: crispawn_core::live::StorageStatus,
     },
+    Diagnostic {
+        name: String,
+        value: serde_json::Value,
+    },
     Finished {
         success: bool,
         code: String,
@@ -833,6 +837,12 @@ impl EventSink for Controller {
             read_raw_bytes: read.to_string(),
             queued_encoded_bytes: queued.to_string(),
             queue_budget_bytes: budget.to_string(),
+        });
+    }
+    fn diagnostic(&self, name: &str, value: &serde_json::Value) {
+        self.events.emit(JobEvent::Diagnostic {
+            name: name.into(),
+            value: value.clone(),
         });
     }
     fn settings(&self, plan: &Plan, verify_workers: u32, total: u64, reason: &str) {

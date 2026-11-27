@@ -177,7 +177,8 @@ The sample also records process CPU/I/O counters, dirty/writeback memory, actual
 writeback-limit settings, I/O pressure, partition I/O counters and available USB
 protocol/speed/queue attributes. Permission-denied or unavailable kernel details
 are recorded; the observer does not alter Secure Boot, kernel restrictions,
-writeback settings, the device or firmware. NAND-internal garbage collection
+writeback settings, the device or firmware. (The live worker itself bounds the
+destination's dirty cache; see below.) NAND-internal garbage collection
 cannot be conclusively identified without device telemetry.
 
 On normal completion, the full retained trace is copied under the generated
@@ -191,3 +192,49 @@ Native tests block the actual continuous-log write syscall for more than ten
 seconds, complete a real ordinary-file copy in parallel, then test full-history
 recovery and bounded backlog overflow. QEMU evidence is recorded separately;
 neither native fixtures nor virtual disks prove a physical USB throughput fix.
+
+## Destination writeback bound (alpha.5)
+
+A real USB run accepted writes about 2.6 GB ahead of the device (dirty page
+cache at the global 20% ratio) while the device completed about 2.5 MB/s. That
+is roughly 17 minutes of unwritten data. Data writers were throttled in
+`balance_dirty_pages` either way, so the extra cache did not raise throughput,
+but every final sync, failure-log export and unmount had to wait behind it.
+That run lost its last ~5 minutes of event log and has no failure-log folder.
+
+After mounting the destination, `crispawn-live` sets the destination disk's
+`/sys/class/bdi/<dev>/max_bytes` to 256 MiB and `strict_limit` to 1. Only the
+USB destination is changed, inside the live system; nothing is written to the
+host firmware or other disks. Previous and resulting values, and any error, are
+recorded as `destination_writeback_limit`. Failure to apply is not fatal.
+
+## Analysis records (alpha.5)
+
+The engine emits bounded `job_event` records of type `diagnostic` to the normal
+continuous log (not to the text console):
+
+| `name` | When | Content |
+| --- | --- | --- |
+| `frame` | each encoded frame | lane, range, raw/stored bytes, stored and requested profile, encode CPU, whether xz is held, optional zstd-3 probe size |
+| `codec_summary` | end of reading | per profile frames, raw/stored bytes, encode CPU; probe totals |
+| `storage_chunk` | each appended chunk | part, offset, bytes, source bytes, queue/write/check ms, writer thread |
+| `storage_part` | each sealed part | part, bytes, chunk count, open seconds, FIEMAP extent count when supported |
+| `storage_summary` | end of copy | chunk/part totals, part size classes, maximum chunk queue/write time and extents |
+
+Every 64th frame encoded while xz is held is also compressed with zstd-3 in RAM
+to log the size difference on identical data. That result is discarded; queued
+or stored data is never re-encoded. Operation accounting now keeps RAM-backed
+runtime files (`/run`, `/dev/shm`, e.g. the 250 ms `status.json`) under
+`runtime_file_create`, `runtime_rename` and `runtime_file_sync`, separate from
+NTFS `file_create`/`rename`/`file_sync`. Observer samples add `/proc/vmstat`
+dirty/writeback counters and thresholds and the destination's bdi settings.
+
+## Writer-backlog codec hold (alpha.5)
+
+When the encoded queue stays at least half full for 30 seconds while process
+CPU use is below 80%, new frames are encoded with xz-6, including
+hard-to-compress data. Writers idle with a queue below 10% (or CPU at 90% or
+more) for 10 seconds step the hold down to xz-3 and then back to the adaptive
+choice. The hold changes only frames not yet read; already encoded or queued
+frames are never re-encoded. Each change is logged with its inputs.
+
