@@ -128,7 +128,11 @@ def inspect(root, source):
 
 
 class SegmentedStream:
-    """Independent streaming reader for the existing segmented-file format."""
+    """Independent streaming reader for segmented descriptors.
+
+    Schema 1: one file per write unit (at most 16 MiB). Schema 2: appended
+    large parts (at most 1 GiB). Parts are hashed and read in bounded chunks.
+    """
     def __init__(self, root, name, backup_id, file_id, stored, descriptor_hash, blake3):
         path = root / name
         assert path.is_file() and not path.is_symlink() and path.stat().st_size <= 8 << 20
@@ -136,7 +140,8 @@ class SegmentedStream:
         assert blake3(descriptor).hexdigest() == descriptor_hash
         value = json.loads(descriptor)
         assert set(value) == {'kind', 'schema_version', 'backup_id', 'file_id', 'bytes', 'parts'}
-        assert value['kind'] == 'crispawn.segmented_file' and value['schema_version'] == 1
+        assert value['kind'] == 'crispawn.segmented_file' and value['schema_version'] in (1, 2)
+        part_limit = 16 << 20 if value['schema_version'] == 1 else 1 << 30
         assert value['backup_id'] == backup_id and value['file_id'] == file_id and value['bytes'] == stored
         assert len(value['parts']) <= 32768
         position, names = 0, set()
@@ -144,35 +149,45 @@ class SegmentedStream:
             assert set(part) == {'path', 'stream_offset', 'bytes', 'used', 'blake3'}
             assert re.fullmatch(r'segments/' + f'{file_id:08x}' + r'/[0-9a-fA-F]{32}\.bin', part['path'])
             assert part['path'] not in names and part['stream_offset'] == position
-            assert 0 < part['used'] <= part['bytes'] <= 16 << 20
+            assert 0 < part['used'] <= part['bytes'] <= part_limit
             assert re.fullmatch(r'[0-9a-f]{64}', part['blake3'])
             names.add(part['path']); position += part['used']
         assert position == stored
         self.root, self.parts, self.blake3 = root / 'data', value['parts'], blake3
-        self.index, self.payload, self.offset = 0, memoryview(b''), 0
+        self.index, self.file, self.remaining = 0, None, 0
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_):
-        self.payload = memoryview(b'')
+        if self.file:
+            self.file.close()
+        self.file = None
 
     def read(self, length):
         assert 0 <= length <= 16 << 20
         result = bytearray()
         while len(result) < length:
-            if self.offset == len(self.payload):
+            if self.remaining == 0:
+                if self.file:
+                    self.file.close()
+                    self.file = None
                 if self.index == len(self.parts):
                     break
                 part = self.parts[self.index]; self.index += 1
                 path = self.root / part['path']
                 assert all(not parent.is_symlink() for parent in [path, path.parent, path.parent.parent])
                 assert path.is_file() and path.stat().st_size == part['bytes']
-                data = path.read_bytes()
-                assert self.blake3(data).hexdigest() == part['blake3']
-                self.payload, self.offset = memoryview(data)[:part['used']], 0
-            count = min(length - len(result), len(self.payload) - self.offset)
-            result.extend(self.payload[self.offset:self.offset + count]); self.offset += count
+                stream = path.open('rb')
+                digest = self.blake3()
+                while block := stream.read(16 << 20):
+                    digest.update(block)
+                assert digest.hexdigest() == part['blake3']
+                stream.seek(0)
+                self.file, self.remaining = stream, part['used']
+            data = self.file.read(min(length - len(result), self.remaining))
+            assert data
+            result.extend(data); self.remaining -= len(data)
         return bytes(result)
 
 
@@ -205,7 +220,7 @@ def inspect_v2(root, source, commit, meta, plan):
         columns.append("compression_profiles")
     if segmented:
         columns.append("storage_descriptor_blake3")
-    vocabulary = {"raw:0", "zero:0", "zstd:1", "zstd:3", "zstd:6", "zstd:9", "xz:0", "xz:3", "gzip:1", "gzip:6", "gzip:9"}
+    vocabulary = {"raw:0", "zero:0", "zstd:1", "zstd:3", "zstd:6", "zstd:9", "xz:0", "xz:3", "xz:6", "gzip:1", "gzip:6", "gzip:9"}
 
     def checked(data, magic, length):
         assert len(data) == length and data[:8] == magic

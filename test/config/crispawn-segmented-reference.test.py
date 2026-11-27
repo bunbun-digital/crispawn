@@ -36,8 +36,8 @@ class SegmentedReference(unittest.TestCase):
             position += used
         self.path = self.root / 'data/data-000001.pbk'
 
-    def reader(self, parts=None):
-        descriptor = dict(kind='crispawn.segmented_file', schema_version=1, backup_id='a' * 32,
+    def reader(self, parts=None, schema=1):
+        descriptor = dict(kind='crispawn.segmented_file', schema_version=schema, backup_id='a' * 32,
                           file_id=1, bytes=14, parts=self.parts if parts is None else parts)
         data = json.dumps(descriptor).encode()
         self.path.write_bytes(data)
@@ -56,6 +56,22 @@ class SegmentedReference(unittest.TestCase):
         (self.root / 'data' / self.parts[0]['path']).write_bytes(b'abcdefFAIL')
         with self.assertRaises(AssertionError):
             stream.read(1)
+
+    def test_schema_two_accepts_parts_above_the_schema_one_limit(self):
+        big = dict(self.parts[1], bytes=(16 << 20) + 1)
+        with self.assertRaises(AssertionError):
+            self.reader([self.parts[0], big])
+        large = self.root / 'data/segments/00000001/' / ('f' * 32 + '.bin')
+        payload = bytes(range(256)) * ((16 << 20) // 256 + 1)
+        large.write_bytes(payload)
+        part = dict(path='segments/00000001/' + large.name, stream_offset=0, bytes=len(payload),
+                    used=14, blake3=blake3(payload).hexdigest())
+        with self.assertRaises(AssertionError):
+            self.reader([part], schema=1)
+        with self.reader([part], schema=2) as stream:
+            self.assertEqual(stream.read(14), payload[:14])
+        with self.assertRaises(AssertionError):
+            self.reader([part], schema=3)
 
     def test_missing_range_or_parent_escape_is_rejected(self):
         for change in [{'stream_offset': 9}, {'path': '../outside.bin'}]:
