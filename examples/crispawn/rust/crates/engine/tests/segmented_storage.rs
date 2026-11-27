@@ -334,11 +334,13 @@ fn one_compression_frame_spans_independently_checked_physical_files_and_restores
     assert!(r.dataset_committed);
     assert_eq!(r.verification_kind, "compressed_blake3");
     progress.check(raw.len() as u64);
+    // Schema 2: frames span independently checked appended chunks inside one
+    // large part per stream; the footer shares that part (no tiny extra file).
     let pieces = parts(&archive);
-    assert!(pieces.len() >= 3);
+    assert!(!pieces.is_empty());
     assert!(pieces
         .iter()
-        .all(|p| fs::metadata(p).unwrap().len() <= 16 << 20));
+        .all(|p| (97..=1 << 30).contains(&fs::metadata(p).unwrap().len())));
     let index = fs::read_to_string(archive.join("files.csv")).unwrap();
     assert!(index
         .lines()

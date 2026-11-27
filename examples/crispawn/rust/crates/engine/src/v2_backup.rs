@@ -161,7 +161,12 @@ fn seal(
         "INVALID_STATE",
         "cannot seal empty v2 backup file",
     )?;
-    checkpoint(&mut f, journal, meta, plan, report, hooks)?;
+    // Segmented storage appends the footer to the same physical part and
+    // publishes it with one sync; a separate checkpoint sync first would close
+    // the part and put the footer alone into a tiny extra file.
+    if !plan.segmented_storage {
+        checkpoint(&mut f, journal, meta, plan, report, hooks)?;
+    }
     let hash = *f.hash.finalize().as_bytes();
     let mut entry = FileEntry {
         file_id: f.id,
@@ -189,6 +194,10 @@ fn seal(
             hash,
         ),
     )?;
+    if plan.segmented_storage {
+        // Syncs data and footer together, then records the data prefix.
+        checkpoint(&mut f, journal, meta, plan, report, hooks)?;
+    }
     f.file.sync()?;
     entry.storage_descriptor_blake3 = f.file.descriptor_blake3()?;
     hooks.at("after_footer_sync")?;
