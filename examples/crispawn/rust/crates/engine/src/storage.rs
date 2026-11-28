@@ -41,6 +41,11 @@ const GOAL: f64 = 5.0;
 const SMALL_GOAL: f64 = 30.0;
 const SCHEMA: u32 = 2;
 const MAX_DIAGNOSTICS: usize = 8192;
+/// New parts reserve up to their size limit so two streams growing at once
+/// do not interleave on the disk; smaller reservations are not worth it.
+const PREALLOCATE_MIN: u64 = 64 << 20;
+/// Allocation left past the sealed length that still counts as trimmed.
+const TRIM_SLACK: u64 = 1 << 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,6 +152,9 @@ struct Summary {
     max_chunk_write_ms: u64,
     max_chunk_queue_ms: u64,
     max_part_extents: u32,
+    parts_preallocated: u64,
+    preallocate_failures: u64,
+    preallocated_bytes: u64,
 }
 pub(crate) struct Shared {
     pub pool: Arc<CpuPool>,
@@ -282,6 +290,8 @@ impl Shared {
         chunks: u32,
         seconds: f64,
         extents: Option<u32>,
+        preallocated: u64,
+        allocated: Option<u64>,
     ) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let class = match bytes {
@@ -299,7 +309,8 @@ impl Shared {
             &mut s,
             "storage_part",
             serde_json::json!({"part":relative,"bytes":bytes,"chunks":chunks,
-                "open_seconds":(seconds*1000.0).round()/1000.0,"extents":extents}),
+                "open_seconds":(seconds*1000.0).round()/1000.0,"extents":extents,
+                "preallocated":preallocated,"allocated_bytes":allocated}),
         );
     }
     /// Emit and clear collected storage diagnostics.
@@ -555,6 +566,7 @@ struct WriteContext {
     cancelled: Arc<AtomicBool>,
     hooks: Arc<dyn Hooks>,
     verify_after_write: bool,
+    part_limit: u64,
 }
 impl WriteContext {
     fn check(&self) -> Result<()> {
@@ -631,8 +643,22 @@ impl WriteContext {
             }
             self.hooks.at("before_segment_write")?;
             crate::destination_space::check(directory)?;
+            let mut preallocate = serde_json::Value::Null;
             if input.part_offset == 0 {
                 let created = io::create_new(&input.path)?;
+                let reserving = Instant::now();
+                let (granted, errno) = preallocate_part(&created, directory, self.part_limit);
+                input.reservation.grant(granted);
+                preallocate = serde_json::json!({"bytes":granted,"errno":errno,
+                    "ms":reserving.elapsed().as_millis() as u64});
+                let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if granted > 0 {
+                    s.summary.parts_preallocated += 1;
+                    s.summary.preallocated_bytes += granted;
+                } else if errno.is_some() {
+                    s.summary.preallocate_failures += 1;
+                }
+                drop(s);
                 require(
                     input.file.set(created).is_ok(),
                     "INVALID_STATE",
@@ -655,6 +681,7 @@ impl WriteContext {
                     crate::io_trace::span(crate::io_trace::Op::DataWrite, input.bytes.len() as u64);
                 io::write_all_at(file, &input.bytes, input.part_offset)?;
             }
+            input.reservation.consume(input.bytes.len() as u64);
             let write_ms = started.elapsed().as_millis() as u64;
             {
                 let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -699,7 +726,7 @@ impl WriteContext {
                     serde_json::json!({"part":input.relative,"offset":input.part_offset,
                         "bytes":input.bytes.len(),"source_bytes":input.source_bytes,
                         "queue_ms":queue_ms,"write_ms":write_ms,"check_ms":check_ms,
-                        "writer":writer}),
+                        "writer":writer,"preallocate":preallocate}),
                 );
             }
             Ok(ChunkReceipt {
@@ -736,6 +763,106 @@ struct ChunkInput {
     source_bytes: u64,
     started: Instant,
     file: Arc<OnceLock<File>>,
+    reservation: Arc<Reservation>,
+}
+/// Space preallocated (FALLOC_FL_KEEP_SIZE) for one open part. Bytes not yet
+/// written stay in `destination_space::RESERVED` until the part seals or is
+/// dropped.
+#[derive(Default)]
+struct Reservation {
+    remaining: AtomicU64,
+    granted: AtomicU64,
+}
+impl Reservation {
+    fn grant(&self, bytes: u64) {
+        if bytes > 0 {
+            self.granted.store(bytes, Ordering::Release);
+            self.remaining.store(bytes, Ordering::Release);
+            crate::destination_space::RESERVED.fetch_add(bytes, Ordering::AcqRel);
+        }
+    }
+    fn consume(&self, bytes: u64) {
+        let before = self
+            .remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |r| {
+                Some(r.saturating_sub(bytes))
+            })
+            .unwrap_or(0);
+        crate::destination_space::RESERVED.fetch_sub(before.min(bytes), Ordering::AcqRel);
+    }
+    /// Stop counting the unwritten rest; returns the original grant.
+    fn release(&self) -> u64 {
+        let rest = self.remaining.swap(0, Ordering::AcqRel);
+        crate::destination_space::RESERVED.fetch_sub(rest, Ordering::AcqRel);
+        self.granted.load(Ordering::Acquire)
+    }
+}
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+/// Reserve contiguous space for a new part without changing its length, so
+/// appends to two growing parts do not interleave cluster by cluster. Uses at
+/// most a quarter of the space above the destination minimum.
+fn preallocate_part(file: &File, directory: &Path, limit: u64) -> (u64, Option<i32>) {
+    use std::os::fd::AsRawFd;
+    // Memory filesystems gain nothing and may enforce quotas statvfs hides.
+    if memory_filesystem(directory) {
+        return (0, None);
+    }
+    let Ok(free) = io::available_bytes(directory) else {
+        return (0, None);
+    };
+    let budget = free.saturating_sub(crate::destination_space::MIN_FREE_BYTES) / 4;
+    let size = limit.min(budget) & !((1 << 20) - 1);
+    if size < PREALLOCATE_MIN {
+        return (0, None);
+    }
+    // SAFETY: valid open descriptor; KEEP_SIZE leaves the file length unchanged.
+    let rc = unsafe {
+        libc::fallocate(
+            file.as_raw_fd(),
+            libc::FALLOC_FL_KEEP_SIZE,
+            0,
+            size as libc::off_t,
+        )
+    };
+    if rc == 0 {
+        (size, None)
+    } else {
+        (0, std::io::Error::last_os_error().raw_os_error())
+    }
+}
+fn memory_filesystem(directory: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    const TMPFS_MAGIC: i64 = 0x0102_1994;
+    const RAMFS_MAGIC: i64 = 0x8584_58f6;
+    let Ok(path) = std::ffi::CString::new(directory.as_os_str().as_bytes()) else {
+        return true;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: valid NUL-terminated path and owned writable structure.
+    if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return true;
+    }
+    // SAFETY: statfs succeeded and initialized the structure.
+    let kind = unsafe { stat.assume_init() }.f_type as i64;
+    kind == TMPFS_MAGIC || kind == RAMFS_MAGIC
+}
+fn allocated_bytes(file: &File) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata().ok().map(|m| m.blocks() * 512)
+}
+/// Free preallocated clusters past the sealed length. A same-length truncate
+/// does this on most filesystems; otherwise shrink from one byte longer.
+fn trim_preallocation(file: &File, bytes: u64) -> Result<Option<u64>> {
+    file.set_len(bytes)?;
+    if allocated_bytes(file).is_some_and(|a| a > bytes + TRIM_SLACK) {
+        file.set_len(bytes + 1)?;
+        file.set_len(bytes)?;
+    }
+    Ok(allocated_bytes(file))
 }
 struct ChunkReceipt {
     source_bytes: u64,
@@ -751,6 +878,7 @@ struct Current {
     hash: blake3::Hasher,
     chunks: u32,
     opened: Instant,
+    reservation: Arc<Reservation>,
 }
 enum PendingPart {
     Chunk {
@@ -758,7 +886,16 @@ enum PendingPart {
         receiver: Mutex<mpsc::Receiver<Result<ChunkReceipt>>>,
     },
     /// Published only after every earlier chunk of the part has a receipt.
-    Seal(Box<(Part, PathBuf, Arc<OnceLock<File>>, u32, Instant)>),
+    Seal(
+        Box<(
+            Part,
+            PathBuf,
+            Arc<OnceLock<File>>,
+            u32,
+            Instant,
+            Arc<Reservation>,
+        )>,
+    ),
 }
 pub(crate) struct DataFile {
     path: PathBuf,
@@ -976,10 +1113,17 @@ impl DataFile {
             let Some(PendingPart::Seal(sealed)) = self.pending.pop_front() else {
                 unreachable!()
             };
-            let (part, path, file, chunks, opened) = *sealed;
+            let (part, path, file, chunks, opened, reservation) = *sealed;
             let file = file
                 .get()
                 .ok_or_else(|| Error::new("INVALID_STATE", "sealed part was never opened"))?;
+            // Trim before the identity is taken: truncation updates timestamps.
+            let preallocated = reservation.release();
+            let allocated = if preallocated > 0 {
+                trim_preallocation(file, part.bytes)?
+            } else {
+                allocated_bytes(file)
+            };
             let identity = io::identity(file)?;
             let m = self.manifest.as_mut().unwrap();
             require(
@@ -995,6 +1139,8 @@ impl DataFile {
                 chunks,
                 opened.elapsed().as_secs_f64(),
                 extents,
+                preallocated,
+                allocated,
             );
             m.bytes += part.bytes;
             self.pending_bytes -= part.bytes;
@@ -1066,7 +1212,12 @@ impl DataFile {
                 blake3: c.hash.finalize().to_hex().to_string(),
             };
             self.pending.push_back(PendingPart::Seal(Box::new((
-                part, c.path, c.file, c.chunks, c.opened,
+                part,
+                c.path,
+                c.file,
+                c.chunks,
+                c.opened,
+                c.reservation,
             ))));
         }
     }
@@ -1116,6 +1267,7 @@ impl DataFile {
                 hash: blake3::Hasher::new(),
                 chunks: 0,
                 opened: Instant::now(),
+                reservation: Arc::default(),
             });
         }
         let key = m.file_id;
@@ -1131,6 +1283,7 @@ impl DataFile {
             source_bytes: self.buffer_source_bytes,
             started: Instant::now(),
             file: c.file.clone(),
+            reservation: c.reservation.clone(),
         };
         c.bytes += size;
         c.chunks += 1;
@@ -1140,6 +1293,7 @@ impl DataFile {
             state: shared.state.clone(),
             cancelled: shared.cancelled.clone(),
             hooks: shared.hooks.clone(),
+            part_limit: shared.part_limit,
         };
         let job = shared.next_job.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
@@ -2020,6 +2174,59 @@ mod tests {
         assert_eq!(actual, bytes);
         let summary = s.state.lock().unwrap().summary.parts_sealed;
         assert_eq!(summary, 3);
+    }
+    #[test]
+    fn new_parts_preallocate_without_changing_length_and_trim_when_sealed() {
+        // A real disk filesystem (the crate directory), not a small tmpfs.
+        let t = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut s = Shared::new(&"1".repeat(32), 2).unwrap();
+        Arc::get_mut(&mut s).unwrap().part_limit = PREALLOCATE_MIN;
+        s.calibrate(1 << 20, 4.0);
+        let plan = Plan {
+            format_version: 3,
+            segmented_storage: true,
+            ..Plan::default()
+        };
+        let path = t.path().join("00000000.pbk.partial");
+        let mut f = DataFile::create(&path, &plan, &"1".repeat(32), 0, s.clone()).unwrap();
+        let bytes = (0..(3 << 20) + 7)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>();
+        f.write_all(&bytes).unwrap();
+        f.flush_part().unwrap();
+        while f.pending_chunks() > 0 {
+            f.receive_part(true).unwrap();
+        }
+        let part = f.current.as_ref().unwrap().file.get().unwrap();
+        assert_eq!(part.metadata().unwrap().len(), bytes.len() as u64);
+        let summary = |s: &Shared| {
+            let st = s.state.lock().unwrap();
+            (
+                st.summary.parts_preallocated,
+                st.summary.preallocate_failures,
+            )
+        };
+        let (granted, failed) = summary(&s);
+        let free = io::available_bytes(t.path()).unwrap();
+        if free > crate::destination_space::MIN_FREE_BYTES + 8 * PREALLOCATE_MIN {
+            assert_eq!((granted, failed), (1, 0), "ext4/xfs support KEEP_SIZE");
+            assert!(allocated_bytes(part).unwrap() >= PREALLOCATE_MIN);
+        }
+        f.sync().unwrap();
+        let records = std::mem::take(&mut s.state.lock().unwrap().diagnostics);
+        let sealed = records
+            .iter()
+            .find(|(n, _)| *n == "storage_part")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let length = bytes.len() as u64;
+        assert!(sealed["allocated_bytes"].as_u64().unwrap() <= length + TRIM_SLACK);
+        assert_eq!(sealed["preallocated"], granted * PREALLOCATE_MIN);
+        let r = DataFile::read(&path, true).unwrap();
+        r.verify_parts(Some(&s), &AtomicBool::new(false)).unwrap();
+        let mut actual = vec![0; bytes.len()];
+        io::read_exact_at(&r, &mut actual, 0, 777_777).unwrap();
+        assert_eq!(actual, bytes);
     }
     #[test]
     fn schema_two_parts_above_the_old_limit_are_rejected_by_schema_one_rules() {

@@ -4,10 +4,14 @@
 use crate::{io, Error, Result};
 use std::{
     path::Path,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 pub(crate) const MIN_FREE_BYTES: u64 = 1_000_000_000;
+/// Space preallocated for open storage parts but not yet written. statvfs
+/// already counts it as used, yet those parts can still fill it.
+pub(crate) static RESERVED: AtomicU64 = AtomicU64::new(0);
 
 fn check_available(free: u64) -> Result<()> {
     if free < MIN_FREE_BYTES {
@@ -54,7 +58,7 @@ pub(crate) fn gate(
 }
 
 pub(crate) fn check(path: &Path) -> Result<()> {
-    check_available(io::available_bytes(path)?)
+    check_available(io::available_bytes(path)?.saturating_add(RESERVED.load(Ordering::Acquire)))
 }
 
 pub(crate) struct Monitor(Instant);

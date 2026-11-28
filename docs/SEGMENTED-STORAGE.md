@@ -48,6 +48,28 @@ Schema 2 separates the **write unit** from the **file unit**:
   instead of five, before a time-based flush, so zero-filled disk regions no
   longer create tiny appends. Size-based flushes and stream seals are unchanged.
 
+### Part preallocation (alpha.5-rc.2)
+
+A real USB run of alpha.5-rc.1 (KIOXIA TransMemory, BOT) wrote at 0.98 MB/s,
+below rc.9's 2.52 MB/s. Each 1 GiB part had 372-527 NTFS extents: the two
+streams' appends were allocated alternately. On the same device under Windows,
+16 MiB sequential writes reached about 9 MB/s on NTFS and exFAT alike; two
+growing files appended alternately in 2 MiB steps reached about 1 MB/s; the
+same pattern into two files allocated in advance reached 6.9-9.0 MB/s
+(`research/usb-fs-bench-20261127/`).
+
+A new part therefore reserves space with `fallocate(FALLOC_FL_KEEP_SIZE)` before
+its first append: up to the part limit (1 GiB), at most a quarter of the free
+space above the 1,000,000,000-byte destination minimum, and only when that is at
+least 64 MiB. The file length, append offsets, descriptor fields and on-disk
+format are unchanged; the reservation is invisible to readers and to older ISOs.
+When the part seals, the unused allocation is released by truncating to the
+sealed length before its identity is recorded. Unwritten reserved bytes are
+added back in the destination free-space check, so a reservation never triggers
+`DESTINATION_LOW_SPACE` by itself. Memory filesystems (tmpfs, ramfs) are not
+preallocated. A filesystem that rejects the request is written as before and
+the errno is logged.
+
 Schema 1 descriptors (up to 16 MiB per part, any number of parts within the
 existing limits) remain readable for verification and restore. Older ISOs reject
 `schema_version: 2` with `UNKNOWN_VERSION`; restore new backups with this ISO or

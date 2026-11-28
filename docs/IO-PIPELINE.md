@@ -217,9 +217,9 @@ continuous log (not to the text console):
 | --- | --- | --- |
 | `frame` | each encoded frame | lane, range, raw/stored bytes, stored and requested profile, encode CPU, whether xz is held, optional zstd-3 probe size |
 | `codec_summary` | end of reading | per profile frames, raw/stored bytes, encode CPU; probe totals |
-| `storage_chunk` | each appended chunk | part, offset, bytes, source bytes, queue/write/check ms, writer thread |
-| `storage_part` | each sealed part | part, bytes, chunk count, open seconds, FIEMAP extent count when supported |
-| `storage_summary` | end of copy | chunk/part totals, part size classes, maximum chunk queue/write time and extents |
+| `storage_chunk` | each appended chunk | part, offset, bytes, source bytes, queue/write/check ms, writer thread; for a part's first chunk the preallocation size, errno and time |
+| `storage_part` | each sealed part | part, bytes, chunk count, open seconds, FIEMAP extent count when supported, preallocated bytes, allocated bytes after trimming |
+| `storage_summary` | end of copy | chunk/part totals, part size classes, maximum chunk queue/write time and extents, preallocated parts/bytes and failures |
 
 Every 64th frame encoded while xz is held is also compressed with zstd-3 in RAM
 to log the size difference on identical data. That result is discarded; queued
