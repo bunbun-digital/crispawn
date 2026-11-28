@@ -85,7 +85,18 @@ def verify_case(folder, source, media, runtime, usb, host, env, *, proof=None):
             for row in csv.DictReader(stream):
                 name=row['relative_path']
                 assert re.fullmatch(r'data/data-[0-9]{6}\.pbk',name)
-                (archive/name).write_bytes(cat(prefix+name))
+                descriptor = cat(prefix+name)
+                (archive/name).write_bytes(descriptor)
+                # Segmented descriptors name their physical parts under data/.
+                if descriptor[:1] == b'{':
+                    value = json.loads(descriptor)
+                    assert value['kind'] == 'crispawn.segmented_file'
+                    for part in value['parts']:
+                        relative = part['path']
+                        assert re.fullmatch(r'segments/[0-9a-f]{8}/[0-9a-f]{32}\.bin', relative)
+                        target = archive/'data'/relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(cat(prefix+'data/'+relative))
         verified=subprocess.run(['python3',ROOT/'tools/check-crispawn-format.py',archive,'--source-file',source],
                                 env=dict(os.environ,PYTHONPATH=str(ROOT/'build/verifier-libs')),
                                 capture_output=True,timeout=180)
@@ -97,10 +108,20 @@ def verify_case(folder, source, media, runtime, usb, host, env, *, proof=None):
         # Progress is published at checkpoints, so a low-space failure can
         # precede the first nonzero public snapshot. Check actual NTFS data.
         saved_bytes = 0
-        data_files = listing(prefix+'data')
+        data_files = []
+        for name in listing(prefix+'data'):
+            if name == 'segments':
+                # Segmented descriptors keep physical parts below data/segments/.
+                for stream in listing(prefix+'data/segments'):
+                    assert re.fullmatch(r'[0-9a-f]{8}',stream)
+                    for part in listing(prefix+'data/segments/'+stream):
+                        assert re.fullmatch(r'[0-9a-f]{32}\.bin',part)
+                        data_files.append('segments/'+stream+'/'+part)
+            else:
+                assert re.fullmatch(r'data-[0-9]{6}\.pbk(?:\.part)?',name)
+                data_files.append(name)
         assert data_files
         for name in data_files:
-            assert re.fullmatch(r'data-[0-9]{6}\.pbk(?:\.part)?',name)
             with tempfile.TemporaryFile() as errors:
                 proc = subprocess.Popen([str(host/'usr/bin/ntfscat'),str(ntfs),prefix+'data/'+name],
                                         env=env,stdout=subprocess.PIPE,stderr=errors)
@@ -132,6 +153,13 @@ def verify_case(folder, source, media, runtime, usb, host, env, *, proof=None):
         logdir=proof/'logs'/directory
         logdir.mkdir(parents=True)
         for name in listing('/crispawn/logs/'+directory):
+            if name == 'io-observer':
+                # The independent I/O observer's own records (see IO-PIPELINE.md).
+                (logdir/name).mkdir()
+                for record in listing('/crispawn/logs/'+directory+'/'+name):
+                    assert re.fullmatch(r'(samples-[0-9]+\.jsonl|latest\.json|final\.json|finished\.json)',record)
+                    (logdir/name/record).write_bytes(cat('/crispawn/logs/'+directory+'/'+name+'/'+record))
+                continue
             assert re.fullmatch(r'(events-[0-9]+\.jsonl|log-info\.json|probe-final\.json)',name)
             (logdir/name).write_bytes(cat('/crispawn/logs/'+directory+'/'+name))
         logs.append(verify_log_directory(logdir))
